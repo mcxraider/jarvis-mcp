@@ -5,7 +5,13 @@
  */
 
 import { logger } from '../../utils/logger';
-import { ToolCall, ToolResult, ToolDispatcher } from '../../types/tool.types';
+import {
+  ToolCall,
+  ToolExecutionContext,
+  ToolExecutionPolicy,
+  ToolResult,
+  ToolDispatcher,
+} from '../../types/tool.types';
 import { TodoistAPIService } from '../external/todoist-api.service';
 
 /**
@@ -13,6 +19,44 @@ import { TodoistAPIService } from '../external/todoist-api.service';
  */
 export class DirectToolCallDispatcher implements ToolDispatcher {
   private readonly todoistService: TodoistAPIService;
+  private static readonly userWriteLocks = new Map<string, Promise<void>>();
+  private readonly executionPolicies: Record<string, ToolExecutionPolicy> = {
+    add_todoist_task: {
+      mutatesState: true,
+      resourceType: 'todoist_task',
+      executionMode: 'ordered_write',
+    },
+    get_todoist_task: {
+      mutatesState: false,
+      resourceType: 'todoist_task',
+      executionMode: 'parallel_read',
+    },
+    get_tasks: {
+      mutatesState: false,
+      resourceType: 'todoist_task',
+      executionMode: 'parallel_read',
+    },
+    update_todoist_task: {
+      mutatesState: true,
+      resourceType: 'todoist_task',
+      executionMode: 'ordered_write',
+    },
+    complete_task: {
+      mutatesState: true,
+      resourceType: 'todoist_task',
+      executionMode: 'ordered_write',
+    },
+    delete_todoist_task: {
+      mutatesState: true,
+      resourceType: 'todoist_task',
+      executionMode: 'ordered_write',
+    },
+    get_completed_todoist_tasks: {
+      mutatesState: false,
+      resourceType: 'todoist_task',
+      executionMode: 'parallel_read',
+    },
+  };
 
   constructor() {
     const todoistApiKey = process.env.TODOIST_API_KEY;
@@ -34,34 +78,55 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
    * @param userId - User ID for context/authorization
    * @returns Promise<ToolResult[]> - Results of all tool executions
    */
-  async executeToolCalls(toolCalls: ToolCall[], userId: string): Promise<ToolResult[]> {
+  async executeToolCalls(
+    toolCalls: ToolCall[],
+    context: ToolExecutionContext,
+  ): Promise<ToolResult[]> {
     logger.info('Executing tool calls directly', {
-      userId,
+      jobId: context.jobId,
+      userId: context.userId,
       toolCallsCount: toolCalls.length,
       functionNames: toolCalls.map((tc) => tc.function.name),
     });
 
-    // Execute all tool calls in parallel for better performance
-    const promises = toolCalls.map((toolCall) => this.executeToolCall(toolCall, userId));
+    const mustSerialize = toolCalls.some(
+      (toolCall) => this.getExecutionPolicy(toolCall.function.name)?.mutatesState,
+    );
+
+    if (mustSerialize) {
+      await context.onStage?.('tools.executing', 'Running the requested actions.');
+      const release = await this.acquireUserWriteLock(context.userId);
+      const results: ToolResult[] = [];
+      try {
+        for (const toolCall of toolCalls) {
+          try {
+            const value = await this.executeToolCall(toolCall, context);
+            results.push({
+              tool_call_id: toolCall.id,
+              content: value,
+            });
+          } catch (error) {
+            results.push({
+              tool_call_id: toolCall.id,
+              content: null,
+              error: (error as Error).message,
+            });
+          }
+        }
+      } finally {
+        release();
+      }
+      return results;
+    }
+
+    const promises = toolCalls.map((toolCall) => this.executeToolCall(toolCall, context));
     const results = await Promise.allSettled(promises);
 
-    // Convert Promise.allSettled results to our ToolResult format
-    return results.map((result, index) => {
-      const toolCallId = toolCalls[index].id;
-
-      if (result.status === 'fulfilled') {
-        return {
-          tool_call_id: toolCallId,
-          content: result.value,
-        };
-      } else {
-        return {
-          tool_call_id: toolCallId,
-          content: null,
-          error: result.reason?.message || 'Tool execution failed',
-        };
-      }
-    });
+    return results.map((result, index) => ({
+      tool_call_id: toolCalls[index].id,
+      content: result.status === 'fulfilled' ? result.value : null,
+      error: result.status === 'rejected' ? result.reason?.message || 'Tool execution failed' : undefined,
+    }));
   }
 
   /**
@@ -72,13 +137,15 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
    * @returns Promise<any> - The result of the function execution
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async executeToolCall(toolCall: ToolCall, userId: string): Promise<any> {
+  private async executeToolCall(toolCall: ToolCall, context: ToolExecutionContext): Promise<any> {
     try {
       const functionName = toolCall.function.name;
       const parameters = JSON.parse(toolCall.function.arguments);
+      const startTime = Date.now();
 
       logger.debug('Executing tool call', {
-        userId,
+        jobId: context.jobId,
+        userId: context.userId,
         functionName,
         toolCallId: toolCall.id,
         parameters: Object.keys(parameters),
@@ -87,16 +154,19 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
       const result = await this.routeFunctionCall(functionName, parameters);
 
       logger.debug('Tool call executed successfully', {
-        userId,
+        jobId: context.jobId,
+        userId: context.userId,
         functionName,
         toolCallId: toolCall.id,
         hasResult: !!result,
+        durationMs: Date.now() - startTime,
       });
 
       return result;
     } catch (error) {
       logger.error('Tool call execution error', {
-        userId,
+        jobId: context.jobId,
+        userId: context.userId,
         functionName: toolCall.function.name,
         toolCallId: toolCall.id,
         error: (error as Error).message,
@@ -203,5 +273,30 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
    */
   isFunctionSupported(functionName: string): boolean {
     return this.getSupportedFunctions().includes(functionName);
+  }
+
+  getExecutionPolicy(functionName: string): ToolExecutionPolicy | undefined {
+    return this.executionPolicies[functionName];
+  }
+
+  private async acquireUserWriteLock(userId: string): Promise<() => void> {
+    const current = DirectToolCallDispatcher.userWriteLocks.get(userId);
+    if (current) {
+      await current;
+    }
+
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    DirectToolCallDispatcher.userWriteLocks.set(userId, next);
+
+    return () => {
+      if (DirectToolCallDispatcher.userWriteLocks.get(userId) === next) {
+        DirectToolCallDispatcher.userWriteLocks.delete(userId);
+      }
+      release();
+    };
   }
 }

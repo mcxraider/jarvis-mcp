@@ -4,12 +4,14 @@ import { Telegraf, Context } from 'telegraf';
 import { Message } from 'telegraf/typings/core/types/typegram';
 import { TelegramHandlers } from './handlers/telegram-handlers';
 import { FileService } from './file.service';
-import { MessageProcessorService } from './message-processor.service';
 import { TelegramConfig } from '../../types/telegram.types';
 import { BotActivityService } from './bot-activity.service';
 import { BotStatusService } from './bot-status.service';
 import { TodoistAPIService } from '../external/todoist-api.service';
 import { GPT_CONSTANTS } from '../ai/constants/gpt.constants';
+import { TelegramUpdateIntakeService } from './telegram-update-intake.service';
+import { TelegramResponseService } from './telegram-response.service';
+import { JobService } from '../jobs/job.service';
 
 /**
  * Service class responsible for managing Telegram bot operations
@@ -19,30 +21,34 @@ export class TelegramBotService {
   private readonly botToken: string;
   private readonly handlers: TelegramHandlers;
   private readonly fileService: FileService;
-  private readonly messageProcessor: MessageProcessorService;
   private readonly activityService: BotActivityService;
   private readonly statusService: BotStatusService;
+  private readonly responseService: TelegramResponseService;
 
   constructor(
     config: TelegramConfig,
-    messageProcessor: MessageProcessorService
+    intakeService: TelegramUpdateIntakeService,
+    jobService?: JobService,
   ) {
     this.botToken = config.token;
     this.bot = new Telegraf(config.token);
-    this.messageProcessor = messageProcessor;
     this.fileService = new FileService(this.botToken, this.bot.telegram);
     this.activityService = new BotActivityService();
+    this.responseService = new TelegramResponseService(this.bot.telegram);
     this.statusService = new BotStatusService(this.activityService, {
       gptModel: process.env.OPENAI_MODEL || GPT_CONSTANTS.DEFAULT_MODEL,
       todoistService: process.env.TODOIST_API_KEY
         ? new TodoistAPIService(process.env.TODOIST_API_KEY)
         : undefined,
+      queueSnapshotProvider: jobService,
     });
     this.handlers = new TelegramHandlers(
       this.fileService,
-      this.messageProcessor,
+      intakeService,
       this.activityService,
       this.statusService,
+      this.responseService,
+      jobService || ({} as JobService),
     );
 
     this.setupBotHandlers();

@@ -4,6 +4,7 @@ describe('MessageHandlers', () => {
   function createContext(message: Record<string, unknown>) {
     return {
       from: { id: 123, username: 'tester' },
+      chat: { id: 321 },
       message,
       reply: jest.fn().mockResolvedValue(undefined),
     } as any;
@@ -12,17 +13,32 @@ describe('MessageHandlers', () => {
   it('routes audio documents through processAudioDocument', async () => {
     const fileService = {
       isAudioFile: jest.fn().mockReturnValue(true),
-      getFileUrl: jest.fn().mockResolvedValue('https://example.com/file.mp3'),
     } as any;
-    const messageProcessor = {
-      processAudioDocument: jest.fn().mockResolvedValue('processed document'),
-      processAudioMessage: jest.fn(),
+    const intakeService = {
+      enqueueAudioDocument: jest.fn().mockResolvedValue({
+        job: { id: 'job-1' },
+        acknowledgement: 'Audio file received. I’m processing it now.',
+      }),
     } as any;
     const activityService = {
       recordActivity: jest.fn(),
     } as any;
-    const handlers = new MessageHandlers(fileService, messageProcessor, activityService);
+    const responseService = {
+      sendAcknowledgement: jest.fn().mockResolvedValue({ message_id: 999 }),
+      sendFailureResponse: jest.fn(),
+    } as any;
+    const jobService = {
+      attachAcknowledgement: jest.fn().mockResolvedValue(undefined),
+    } as any;
+    const handlers = new MessageHandlers(
+      fileService,
+      intakeService,
+      activityService,
+      responseService,
+      jobService,
+    );
     const ctx = createContext({
+      message_id: 456,
       document: {
         file_id: 'file-1',
         file_name: 'meeting.mp3',
@@ -34,31 +50,37 @@ describe('MessageHandlers', () => {
     await handlers.handleDocument(ctx);
 
     expect(fileService.isAudioFile).toHaveBeenCalledWith('audio/mpeg');
-    expect(fileService.getFileUrl).toHaveBeenCalledWith('file-1');
-    expect(messageProcessor.processAudioDocument).toHaveBeenCalledWith(
-      'https://example.com/file.mp3',
-      'meeting.mp3',
-      'audio/mpeg',
-      123,
+    expect(intakeService.enqueueAudioDocument).toHaveBeenCalledWith(ctx);
+    expect(responseService.sendAcknowledgement).toHaveBeenCalledWith(
+      321,
+      'Audio file received. I’m processing it now.',
+      456,
     );
-    expect(messageProcessor.processAudioMessage).not.toHaveBeenCalled();
+    expect(jobService.attachAcknowledgement).toHaveBeenCalledWith('job-1', 999);
     expect(activityService.recordActivity).toHaveBeenCalledWith('message_document');
-    expect(ctx.reply).toHaveBeenCalledWith('processed document');
   });
 
   it('rejects non-audio documents with a helpful reply', async () => {
     const fileService = {
       isAudioFile: jest.fn().mockReturnValue(false),
-      getFileUrl: jest.fn(),
     } as any;
-    const messageProcessor = {
-      processAudioDocument: jest.fn(),
-    } as any;
+    const intakeService = {} as any;
     const activityService = {
       recordActivity: jest.fn(),
     } as any;
-    const handlers = new MessageHandlers(fileService, messageProcessor, activityService);
+    const responseService = {
+      sendFailureResponse: jest.fn().mockResolvedValue(undefined),
+    } as any;
+    const jobService = {} as any;
+    const handlers = new MessageHandlers(
+      fileService,
+      intakeService,
+      activityService,
+      responseService,
+      jobService,
+    );
     const ctx = createContext({
+      message_id: 457,
       document: {
         file_id: 'file-1',
         file_name: 'notes.pdf',
@@ -68,10 +90,9 @@ describe('MessageHandlers', () => {
 
     await handlers.handleDocument(ctx);
 
-    expect(fileService.getFileUrl).not.toHaveBeenCalled();
-    expect(messageProcessor.processAudioDocument).not.toHaveBeenCalled();
     expect(activityService.recordActivity).not.toHaveBeenCalled();
-    expect(ctx.reply).toHaveBeenCalledWith(
+    expect(responseService.sendFailureResponse).toHaveBeenCalledWith(
+      321,
       '📄 I received a document, but I only process audio files. Please send an audio file.',
     );
   });
@@ -79,16 +100,27 @@ describe('MessageHandlers', () => {
   it('falls back with a document-specific error when processing fails', async () => {
     const fileService = {
       isAudioFile: jest.fn().mockReturnValue(true),
-      getFileUrl: jest.fn().mockRejectedValue(new Error('download failed')),
     } as any;
-    const messageProcessor = {
-      processAudioDocument: jest.fn(),
+    const intakeService = {
+      enqueueAudioDocument: jest.fn().mockRejectedValue(new Error('queue failed')),
     } as any;
     const activityService = {
       recordActivity: jest.fn(),
     } as any;
-    const handlers = new MessageHandlers(fileService, messageProcessor, activityService);
+    const responseService = {
+      sendAcknowledgement: jest.fn(),
+      sendFailureResponse: jest.fn().mockResolvedValue(undefined),
+    } as any;
+    const jobService = {} as any;
+    const handlers = new MessageHandlers(
+      fileService,
+      intakeService,
+      activityService,
+      responseService,
+      jobService,
+    );
     const ctx = createContext({
+      message_id: 458,
       document: {
         file_id: 'file-1',
         file_name: 'meeting.mp3',
@@ -98,8 +130,9 @@ describe('MessageHandlers', () => {
 
     await handlers.handleDocument(ctx);
 
-    expect(ctx.reply).toHaveBeenCalledWith(
-      '❌ Sorry, I had trouble processing your audio document.',
+    expect(responseService.sendFailureResponse).toHaveBeenCalledWith(
+      321,
+      '❌ Sorry, I had trouble queuing your audio document.',
     );
     expect(activityService.recordActivity).toHaveBeenCalledWith('message_document');
   });

@@ -2,8 +2,10 @@
 import { Context } from 'telegraf';
 import { logger } from '../../../utils/logger';
 import { FileService } from '../file.service';
-import { MessageProcessorService } from '../message-processor.service';
 import { BotActivityService } from '../bot-activity.service';
+import { TelegramUpdateIntakeService } from '../telegram-update-intake.service';
+import { TelegramResponseService } from '../telegram-response.service';
+import { JobService } from '../../jobs/job.service';
 
 /**
  * Handles different types of messages
@@ -11,8 +13,10 @@ import { BotActivityService } from '../bot-activity.service';
 export class MessageHandlers {
   constructor(
     private readonly fileService: FileService,
-    private readonly messageProcessor: MessageProcessorService,
+    private readonly intakeService: TelegramUpdateIntakeService,
     private readonly activityService: BotActivityService,
+    private readonly responseService: TelegramResponseService,
+    private readonly jobService: JobService,
   ) {}
 
   async handleText(ctx: Context): Promise<void> {
@@ -29,14 +33,22 @@ export class MessageHandlers {
     this.activityService.recordActivity('message_text');
 
     try {
-      const response = await this.messageProcessor.processTextMessage(messageText, userId);
-      await ctx.reply(response);
+      const enqueued = await this.intakeService.enqueueText(ctx);
+      const ack = await this.responseService.sendAcknowledgement(
+        ctx.chat!.id,
+        enqueued.acknowledgement,
+        (ctx.message as { message_id: number }).message_id,
+      );
+      await this.jobService.attachAcknowledgement(enqueued.job.id, ack.message_id);
     } catch (error) {
       logger.error('Error processing text message', {
         error: (error as Error).message,
         userId
       });
-      await ctx.reply('❌ Sorry, I had trouble processing your message.');
+      await this.responseService.sendFailureResponse(
+        ctx.chat!.id,
+        '❌ Sorry, I had trouble queuing your message.',
+      );
     }
   }
 
@@ -54,15 +66,22 @@ export class MessageHandlers {
     this.activityService.recordActivity('message_voice');
 
     try {
-      const fileUrl = await this.fileService.getFileUrl(voice.file_id);
-      const response = await this.messageProcessor.processAudioMessage(fileUrl, userId);
-      await ctx.reply(response);
+      const enqueued = await this.intakeService.enqueueVoice(ctx);
+      const ack = await this.responseService.sendAcknowledgement(
+        ctx.chat!.id,
+        enqueued.acknowledgement,
+        (ctx.message as { message_id: number }).message_id,
+      );
+      await this.jobService.attachAcknowledgement(enqueued.job.id, ack.message_id);
     } catch (error) {
       logger.error('Error processing voice message', {
         error: (error as Error).message,
         userId
       });
-      await ctx.reply('❌ Sorry, I had trouble processing your voice message.');
+      await this.responseService.sendFailureResponse(
+        ctx.chat!.id,
+        '❌ Sorry, I had trouble queuing your voice message.',
+      );
     }
   }
 
@@ -93,21 +112,23 @@ export class MessageHandlers {
       });
 
       try {
-        const fileUrl = await this.fileService.getFileUrl(document.file_id);
-        const response = await this.messageProcessor.processAudioDocument(
-          fileUrl,
-          fileName,
-          mimeType,
-          userId,
+        const enqueued = await this.intakeService.enqueueAudioDocument(ctx);
+        const ack = await this.responseService.sendAcknowledgement(
+          ctx.chat!.id,
+          enqueued.acknowledgement,
+          (ctx.message as { message_id: number }).message_id,
         );
-        await ctx.reply(response);
+        await this.jobService.attachAcknowledgement(enqueued.job.id, ack.message_id);
       } catch (error) {
         logger.error('Error processing audio document', {
           error: (error as Error).message,
           userId,
           fileName,
         });
-        await ctx.reply('❌ Sorry, I had trouble processing your audio document.');
+        await this.responseService.sendFailureResponse(
+          ctx.chat!.id,
+          '❌ Sorry, I had trouble queuing your audio document.',
+        );
       }
     } else {
       logger.info('Non-audio document received', {
@@ -115,7 +136,10 @@ export class MessageHandlers {
         mimeType: document.mime_type,
         fileName: document.file_name
       });
-      await ctx.reply('📄 I received a document, but I only process audio files. Please send an audio file.');
+      await this.responseService.sendFailureResponse(
+        ctx.chat!.id,
+        '📄 I received a document, but I only process audio files. Please send an audio file.',
+      );
     }
   }
 
@@ -128,7 +152,8 @@ export class MessageHandlers {
     });
     this.activityService.recordActivity('message_unknown');
 
-    await ctx.reply(
+    await this.responseService.sendFailureResponse(
+      ctx.chat!.id,
       '🤔 I received your message, but I don\'t know how to handle this type yet. Try sending text or audio!'
     );
   }
@@ -147,16 +172,23 @@ export class MessageHandlers {
     });
 
     try {
-      const fileUrl = await this.fileService.getFileUrl(audioFile.file_id);
-      const response = await this.messageProcessor.processAudioMessage(fileUrl, userId);
-      await ctx.reply(response);
+      const enqueued = await this.intakeService.enqueueAudio(ctx);
+      const ack = await this.responseService.sendAcknowledgement(
+        ctx.chat!.id,
+        enqueued.acknowledgement,
+        (ctx.message as { message_id: number }).message_id,
+      );
+      await this.jobService.attachAcknowledgement(enqueued.job.id, ack.message_id);
     } catch (error) {
       logger.error('Error processing audio file', {
         error: (error as Error).message,
         userId,
         fileName
       });
-      await ctx.reply('❌ Sorry, I had trouble processing your audio file.');
+      await this.responseService.sendFailureResponse(
+        ctx.chat!.id,
+        '❌ Sorry, I had trouble queuing your audio file.',
+      );
     }
   }
 }

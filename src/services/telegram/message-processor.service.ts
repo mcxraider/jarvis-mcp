@@ -3,6 +3,7 @@ import { logger } from '../../utils/logger';
 import { TextProcessorService } from './processors/text-processor.service';
 import { AudioProcessorService } from './processors/audio-processor.service';
 import { ToolDispatcher } from '../../types/tool.types';
+import { ProcessingHooks } from '../../types/processing.types';
 
 /**
  * Main service responsible for coordinating message processing
@@ -14,31 +15,43 @@ export class MessageProcessorService {
 
   constructor(toolDispatcher?: ToolDispatcher) {
     this.textProcessor = new TextProcessorService(toolDispatcher);
-    this.audioProcessor = new AudioProcessorService();
+    this.audioProcessor = new AudioProcessorService(toolDispatcher);
   }
 
   /**
    * Processes text messages from users
    */
-  async processTextMessage(text: string, userId?: number): Promise<string> {
+  async processTextMessage(
+    text: string,
+    userId?: number,
+    hooks?: ProcessingHooks,
+    jobId?: string,
+  ): Promise<string> {
     logger.info('Delegating text message processing', {
+      jobId,
       userId,
       messageLength: text.length,
     });
 
-    return this.textProcessor.processTextMessage(text, userId);
+    return this.textProcessor.processTextMessage(text, userId, hooks, jobId);
   }
 
   /**
    * Processes audio messages (voice notes, audio files)
    */
-  async processAudioMessage(fileUrl: string, userId?: number): Promise<string> {
+  async processAudioMessage(
+    fileUrl: string,
+    userId?: number,
+    hooks?: ProcessingHooks,
+    jobId?: string,
+  ): Promise<string> {
     logger.info('Delegating audio message processing', {
+      jobId,
       userId,
       fileUrl: fileUrl.substring(0, 50) + '...', // Log partial URL for privacy
     });
 
-    return this.audioProcessor.processAudioMessage(fileUrl, userId);
+    return this.audioProcessor.processAudioMessage(fileUrl, userId, hooks, jobId);
   }
 
   /**
@@ -49,14 +62,17 @@ export class MessageProcessorService {
     fileName: string,
     mimeType: string,
     userId?: number,
+    hooks?: ProcessingHooks,
+    jobId?: string,
   ): Promise<string> {
     logger.info('Delegating audio document processing', {
+      jobId,
       userId,
       fileName,
       mimeType,
     });
 
-    return this.audioProcessor.processAudioDocument(fileUrl, fileName, mimeType, userId);
+    return this.audioProcessor.processAudioDocument(fileUrl, fileName, mimeType, userId, hooks, jobId);
   }
 
   /**

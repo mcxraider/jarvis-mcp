@@ -1,11 +1,13 @@
 // src/services/telegram/handlers/telegram-handlers.ts
 import { Telegraf, Context } from 'telegraf';
 import { FileService } from '../file.service';
-import { MessageProcessorService } from '../message-processor.service';
 import { CommandHandlers } from '../handlers/command-handlers';
 import { MessageHandlers } from '../handlers/message-handlers';
 import { BotActivityService } from '../bot-activity.service';
 import { BotStatusService } from '../bot-status.service';
+import { TelegramUpdateIntakeService } from '../telegram-update-intake.service';
+import { TelegramResponseService } from '../telegram-response.service';
+import { JobService } from '../../jobs/job.service';
 
 /**
  * Centralizes all Telegram bot handlers
@@ -16,12 +18,20 @@ export class TelegramHandlers {
 
   constructor(
     fileService: FileService,
-    messageProcessor: MessageProcessorService,
+    intakeService: TelegramUpdateIntakeService,
     activityService: BotActivityService,
     statusService: BotStatusService,
+    responseService: TelegramResponseService,
+    jobService: JobService,
   ) {
     this.commandHandlers = new CommandHandlers(activityService, statusService);
-    this.messageHandlers = new MessageHandlers(fileService, messageProcessor, activityService);
+    this.messageHandlers = new MessageHandlers(
+      fileService,
+      intakeService,
+      activityService,
+      responseService,
+      jobService,
+    );
   }
 
   setupHandlers(bot: Telegraf<Context>): void {

@@ -2,6 +2,8 @@
 import { logger } from '../../../utils/logger';
 import { WhisperService } from '../../ai/whisper.service';
 import { GPTService } from '../../ai/gpt.service';
+import { ToolDispatcher } from '../../../types/tool.types';
+import { ProcessingHooks } from '../../../types/processing.types';
 
 /**
  * Service responsible for processing audio messages and documents
@@ -10,7 +12,7 @@ export class AudioProcessorService {
   private readonly whisperService: WhisperService;
   private readonly gptService: GPTService;
 
-  constructor() {
+  constructor(toolDispatcher?: ToolDispatcher) {
     // Initialize WhisperService with English-only enforcement
     this.whisperService = new WhisperService({
       enforceEnglishOnly: true,
@@ -18,20 +20,27 @@ export class AudioProcessorService {
     });
 
     // Initialize GPTService for text processing
-    this.gptService = new GPTService();
+    this.gptService = new GPTService(toolDispatcher);
   }
 
   /**
    * Processes audio messages (voice notes, audio files)
    */
-  async processAudioMessage(fileUrl: string, userId?: number): Promise<string> {
+  async processAudioMessage(
+    fileUrl: string,
+    userId?: number,
+    hooks?: ProcessingHooks,
+    jobId?: string,
+  ): Promise<string> {
     logger.info('Processing audio message', {
+      jobId,
       userId,
       fileUrl: fileUrl.substring(0, 50) + '...', // Log partial URL for privacy
     });
 
     try {
       // Transcribe the audio using Whisper service
+      await hooks?.onStage?.('audio.transcribing');
       const transcriptionResult = await this.whisperService.transcribeAudio(fileUrl, userId);
 
       const { text, processingTimeMs } = transcriptionResult;
@@ -46,7 +55,11 @@ export class AudioProcessorService {
 
       // Process the transcribed text with GPT
       try {
-        const response = await this.gptService.processMessage(text, userId?.toString());
+        await hooks?.onStage?.('gpt.processing');
+        const response = await this.gptService.processMessage(text, userId?.toString(), {
+          jobId,
+          onStage: hooks?.onStage,
+        });
 
         const finalResponse =
           `📝 What you said: ${text}\n\n` +
@@ -87,8 +100,11 @@ export class AudioProcessorService {
     fileName: string,
     mimeType: string,
     userId?: number,
+    hooks?: ProcessingHooks,
+    jobId?: string,
   ): Promise<string> {
     logger.info('Processing audio document', {
+      jobId,
       userId,
       fileName,
       mimeType,
@@ -96,6 +112,7 @@ export class AudioProcessorService {
 
     try {
       // Use the same transcription logic as audio messages
+      await hooks?.onStage?.('audio.transcribing');
       const transcriptionResult = await this.whisperService.transcribeAudio(fileUrl, userId);
 
       const { text, processingTimeMs, fileSizeBytes } = transcriptionResult;
@@ -111,7 +128,11 @@ export class AudioProcessorService {
 
       // Process the transcribed text with GPT
       try {
-        const response = await this.gptService.processMessage(text, userId?.toString());
+        await hooks?.onStage?.('gpt.processing');
+        const response = await this.gptService.processMessage(text, userId?.toString(), {
+          jobId,
+          onStage: hooks?.onStage,
+        });
 
         const finalResponse =
           `📁 Audio document "${fileName}" processed successfully!\n` +

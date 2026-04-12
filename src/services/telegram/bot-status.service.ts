@@ -5,6 +5,12 @@ import { BotActivityService } from './bot-activity.service';
 export interface BotStatusServiceOptions {
   gptModel?: string;
   todoistService?: Pick<TodoistAPIService, 'getProjects'>;
+  queueSnapshotProvider?: {
+    getSnapshot(): Promise<{
+      queued: number;
+      running: number;
+    }>;
+  };
 }
 
 export interface BotStatusSnapshot {
@@ -25,6 +31,10 @@ export interface BotStatusSnapshot {
     lastActivityAt: Date | null;
     lastActivityType: string | null;
   };
+  queue: {
+    queued: number;
+    running: number;
+  };
 }
 
 /**
@@ -33,6 +43,7 @@ export interface BotStatusSnapshot {
 export class BotStatusService {
   private readonly gptModel: string;
   private readonly todoistService?: Pick<TodoistAPIService, 'getProjects'>;
+  private readonly queueSnapshotProvider?: BotStatusServiceOptions['queueSnapshotProvider'];
 
   constructor(
     private readonly activityService: BotActivityService,
@@ -40,11 +51,13 @@ export class BotStatusService {
   ) {
     this.gptModel = options.gptModel || GPT_CONSTANTS.DEFAULT_MODEL;
     this.todoistService = options.todoistService;
+    this.queueSnapshotProvider = options.queueSnapshotProvider;
   }
 
   async getSnapshot(): Promise<BotStatusSnapshot> {
     const activity = this.activityService.getSnapshot();
     const todoist = await this.getTodoistStatus();
+    const queue = await this.getQueueSnapshot();
 
     return {
       runtime: {
@@ -61,6 +74,7 @@ export class BotStatusService {
         lastActivityAt: activity.lastActivityAt,
         lastActivityType: activity.lastActivityType,
       },
+      queue,
     };
   }
 
@@ -82,11 +96,26 @@ export class BotStatusService {
       `*Dependencies*`,
       `• Todoist: ${snapshot.todoist.ok ? 'reachable' : 'degraded'} (${snapshot.todoist.detail})`,
       '',
+      `*Queue*`,
+      `• Queued jobs: ${snapshot.queue.queued}`,
+      `• Running jobs: ${snapshot.queue.running}`,
+      '',
       `*Recent Activity*`,
       `• Total interactions: ${snapshot.activity.totalInteractions}`,
       `• Last activity: ${this.formatLastActivity(snapshot.activity.lastActivityAt)}`,
       `• Last activity type: ${snapshot.activity.lastActivityType || 'none yet'}`,
     ].join('\n');
+  }
+
+  private async getQueueSnapshot(): Promise<BotStatusSnapshot['queue']> {
+    if (!this.queueSnapshotProvider) {
+      return {
+        queued: 0,
+        running: 0,
+      };
+    }
+
+    return this.queueSnapshotProvider.getSnapshot();
   }
 
   private async getTodoistStatus(): Promise<BotStatusSnapshot['todoist']> {

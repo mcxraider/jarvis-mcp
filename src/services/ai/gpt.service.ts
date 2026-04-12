@@ -22,6 +22,11 @@ import { GPTValidator } from './validators/gpt.validator';
 import { GPTErrorHandler } from './errors/gpt-error-handler.service';
 import { FunctionCallingProcessor } from './processors/function-calling.processor';
 import { SimpleTextProcessor } from './processors/simple-text.processor';
+import { ProcessingHooks } from '../../types/processing.types';
+
+export interface GPTProcessingContext extends ProcessingHooks {
+  jobId?: string;
+}
 
 /**
  * Service for generating text content using OpenAI GPT models with function calling
@@ -78,10 +83,15 @@ export class GPTService {
    * @param userId - User identifier for context/authorization
    * @returns Promise<string> - The final response to send back to user
    */
-  async processMessage(message: string, userId?: string): Promise<string> {
+  async processMessage(
+    message: string,
+    userId?: string,
+    context?: GPTProcessingContext,
+  ): Promise<string> {
     const startTime = Date.now();
 
     logger.info('Processing message with GPT', {
+      jobId: context?.jobId,
       userId,
       messageLength: message.length,
       functionCallingEnabled: this.enableFunctionCalling,
@@ -103,6 +113,7 @@ export class GPTService {
             this.config.temperature,
             message,
             userId || 'anonymous',
+            context,
           );
           return result.response;
         }
@@ -121,6 +132,7 @@ export class GPTService {
         if (attempt < MAX_RETRIES && GPTErrorHandler.isRetryableError(lastError)) {
           const delay = GPTErrorHandler.getRetryDelay(attempt);
           logger.warn('Retryable error encountered, retrying', {
+            jobId: context?.jobId,
             userId,
             attempt,
             delayMs: delay,
@@ -137,6 +149,7 @@ export class GPTService {
     const processingTimeMs = Date.now() - startTime;
 
     logger.error('Message processing failed', {
+      jobId: context?.jobId,
       userId,
       messageLength: message.length,
       error: lastError!.message,

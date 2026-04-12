@@ -4,6 +4,7 @@ jest.mock('telegraf', () => {
       setWebhook: jest.fn().mockResolvedValue(undefined),
       deleteWebhook: jest.fn().mockResolvedValue(undefined),
       sendMessage: jest.fn().mockResolvedValue({}),
+      editMessageText: jest.fn().mockResolvedValue(undefined),
       getMe: jest.fn().mockResolvedValue({}),
       setMyCommands: jest.fn().mockResolvedValue(undefined),
     };
@@ -55,6 +56,7 @@ describe('TelegramBotService', () => {
         webhookUrl: 'https://example.com',
         secretToken: 'secret',
       },
+      {} as any,
       {} as any,
     );
   }

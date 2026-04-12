@@ -2,6 +2,7 @@
 import { logger } from '../../../utils/logger';
 import { GPTService } from '../../ai';
 import { ToolDispatcher } from '../../../types/tool.types';
+import { ProcessingHooks } from '../../../types/processing.types';
 
 /**
  * Service responsible for processing text messages
@@ -17,17 +18,28 @@ export class TextProcessorService {
   /**
    * Processes text messages from users
    */
-  async processTextMessage(text: string, userId?: number): Promise<string> {
+  async processTextMessage(
+    text: string,
+    userId?: number,
+    hooks?: ProcessingHooks,
+    jobId?: string,
+  ): Promise<string> {
     logger.info('Processing text message', {
+      jobId,
       userId,
       messageLength: text.length,
     });
 
     try {
       // Process the message using GPT
-      const response = await this.gptService.processMessage(text, userId?.toString());
+      await hooks?.onStage?.('gpt.processing');
+      const response = await this.gptService.processMessage(text, userId?.toString(), {
+        jobId,
+        onStage: hooks?.onStage,
+      });
 
       logger.info('Text message processed successfully', {
+        jobId,
         userId,
         messageLength: text.length,
         responseLength: response.length,
@@ -36,6 +48,7 @@ export class TextProcessorService {
       return response;
     } catch (error) {
       logger.error('Failed to process text message', {
+        jobId,
         userId,
         messageLength: text.length,
         error: (error as Error).message,

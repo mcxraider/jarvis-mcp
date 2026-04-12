@@ -11,6 +11,7 @@ import { GPT_CONSTANTS } from '../constants/gpt.constants';
 import { getFunctionCallingSystemPrompt, FINAL_RESPONSE_PROMPT } from '../../../types/gpt.prompts';
 import { GPTToolsService } from '../../tools/todoist-tools.service';
 import { ToolDispatcher, ToolCall } from '../../../types/tool.types';
+import { GPTProcessingContext } from '../gpt.service';
 
 /**
  * Processor for handling GPT function calling capabilities
@@ -38,6 +39,7 @@ export class FunctionCallingProcessor {
     temperature: number,
     message: string,
     userId: string,
+    context?: GPTProcessingContext,
   ): Promise<MessageProcessingResult> {
     const startTime = Date.now();
 
@@ -80,6 +82,7 @@ export class FunctionCallingProcessor {
           temperature,
           message,
           userId,
+          context,
         );
 
         return {
@@ -132,6 +135,7 @@ export class FunctionCallingProcessor {
     temperature: number,
     originalMessage: string,
     userId: string,
+    context?: GPTProcessingContext,
   ): Promise<string> {
     if (!this.toolDispatcher || !responseMessage.tool_calls) {
       return "I'd like to help you with that, but I'm currently unable to execute the required actions.";
@@ -149,6 +153,7 @@ export class FunctionCallingProcessor {
       }));
 
       logger.info('Executing tool calls', {
+        jobId: context?.jobId,
         userId,
         toolCalls: toolCalls.map((tc) => ({
           id: tc.id,
@@ -168,10 +173,16 @@ export class FunctionCallingProcessor {
       }
 
       // Execute all supported tool calls
-      const toolResults = await this.toolDispatcher.executeToolCalls(supportedCalls, userId);
+      await context?.onStage?.('tools.executing');
+      const toolResults = await this.toolDispatcher.executeToolCalls(supportedCalls, {
+        userId,
+        jobId: context?.jobId,
+        onStage: context?.onStage,
+      });
 
       // Log execution results
       logger.info('Tool execution completed', {
+        jobId: context?.jobId,
         userId,
         results: toolResults.map((result) => ({
           tool_call_id: result.tool_call_id,
@@ -193,6 +204,7 @@ export class FunctionCallingProcessor {
       return finalResponse;
     } catch (error) {
       logger.error('Tool call execution failed', {
+        jobId: context?.jobId,
         userId,
         error: (error as Error).message,
       });
