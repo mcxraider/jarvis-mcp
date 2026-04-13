@@ -431,6 +431,63 @@ Read, search, send, and manage Gmail through Jarvis voice or text commands.
 
 ---
 
+### Email-Triggered Telegram Prompts and Approval Flows
+Jarvis should not only wait for user-initiated commands. It should also be able to watch incoming email events, run a pipeline automatically, and proactively ask the user what to do next inside Telegram.
+
+**What it enables:**
+- Trigger rules based on sender, labels, thread type, or lightweight classification
+- Telegram prompts with inline buttons such as `Yes` / `No`, `Accept draft`, or `Reject`
+- Approval workflows before taking a mutating action
+- Turning passive inbox activity into actionable decisions without opening Gmail
+
+**Example flows:**
+- Email from DBS arrives → run a spending-classification pipeline → Jarvis asks: "Add this to your spending?" with Telegram buttons
+- A person emails you directly → run a reply-drafting pipeline → Jarvis asks whether to accept the draft, reject it, or rewrite in your own style
+- A transactional email arrives → extract structured data first, then ask whether to log it somewhere
+
+**Implementation path:**
+- Add Gmail watch or polling support for new-message events
+- Define trigger rules such as `{ sender, label, classifier, pipelineId }`
+- Add a pipeline stage that can emit a user prompt instead of a final action
+- Support Telegram inline keyboards and callback handling for button-based approvals
+- Persist pending approval state so button presses can resume the correct workflow
+
+**Design considerations:**
+- Avoid spamming Telegram for low-value email
+- Group or debounce related prompts where possible
+- Require explicit approval before send, reply, or write actions
+- Keep the prompt short and show only the context needed to decide
+
+---
+
+### Proactive Incoming Email Summaries
+Jarvis should be able to summarize new emails automatically and deliver the important context in Telegram so the user does not need to open Gmail just to know what came in.
+
+**What it enables:**
+- Short summaries for new inbound mail
+- Sender-aware prioritization so only important email becomes a notification
+- Thread-level context such as "new reply in an ongoing conversation"
+- Triage actions directly from Telegram, such as archive, draft reply, or create a task
+
+**Example outputs:**
+- "DBS emailed you a new card statement. Total due: X. Payment date: Y."
+- "Alice replied about Friday's meeting. She confirmed 3 PM and asked for the latest deck."
+- "Shopee sent a shipment update. Package is out for delivery today."
+
+**Implementation path:**
+- Reuse the Gmail ingestion path for new-message detection
+- Add an email summarization stage that extracts sender, intent, urgency, and requested action
+- Route summaries to Telegram with configurable notification rules
+- Let summary messages offer follow-up actions such as `Draft reply`, `Add task`, or `Ignore`
+
+**Design considerations:**
+- Tune notification thresholds so summaries stay useful instead of noisy
+- Collapse bulk mail and low-signal marketing messages by default
+- Redact or truncate sensitive content unless the user explicitly asks for the full body
+- Prefer concise structured summaries over long paraphrases
+
+---
+
 ### Reminders / Scheduled Messages
 Using a cron-like system, Jarvis could:
 
@@ -508,7 +565,9 @@ If building this incrementally, the most practical order is:
 10. Notion integration
 11. Google Calendar integration
 12. Gmail integration
-13. Reminders / scheduled messages
-14. Image understanding
-15. Docker / deployment hardening
-16. Developer experience improvements
+13. Email-triggered Telegram prompts and approval flows
+14. Proactive incoming email summaries
+15. Reminders / scheduled messages
+16. Image understanding
+17. Docker / deployment hardening
+18. Developer experience improvements
