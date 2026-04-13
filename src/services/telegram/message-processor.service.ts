@@ -3,6 +3,8 @@ import { logger } from '../../utils/logger';
 import { TextProcessorService } from './processors/text-processor.service';
 import { AudioProcessorService } from './processors/audio-processor.service';
 import { ToolDispatcher } from '../../types/tool.types';
+import { ProcessorResponse, ProcessingContext } from '../../types/processing.types';
+import { UsageTrackingService } from '../persistence';
 
 /**
  * Main service responsible for coordinating message processing
@@ -12,33 +14,57 @@ export class MessageProcessorService {
   private readonly textProcessor: TextProcessorService;
   private readonly audioProcessor: AudioProcessorService;
 
-  constructor(toolDispatcher?: ToolDispatcher) {
-    this.textProcessor = new TextProcessorService(toolDispatcher);
-    this.audioProcessor = new AudioProcessorService();
+  constructor(toolDispatcher?: ToolDispatcher, usageTrackingService?: UsageTrackingService) {
+    this.textProcessor = new TextProcessorService(toolDispatcher, usageTrackingService);
+    this.audioProcessor = new AudioProcessorService(usageTrackingService);
   }
 
   /**
    * Processes text messages from users
    */
-  async processTextMessage(text: string, userId?: number): Promise<string> {
+  async processTextMessage(
+    text: string,
+    userId?: number,
+    context?: ProcessingContext,
+  ): Promise<string> {
     logger.info('Delegating text message processing', {
       userId,
       messageLength: text.length,
     });
 
-    return this.textProcessor.processTextMessage(text, userId);
+    return this.textProcessor.processTextMessage(text, userId, context);
+  }
+
+  async processTextMessageDetailed(
+    text: string,
+    userId?: number,
+    context?: ProcessingContext,
+  ): Promise<ProcessorResponse> {
+    return this.textProcessor.processTextMessageDetailed(text, userId, context);
   }
 
   /**
    * Processes audio messages (voice notes, audio files)
    */
-  async processAudioMessage(fileUrl: string, userId?: number): Promise<string> {
+  async processAudioMessage(
+    fileUrl: string,
+    userId?: number,
+    context?: ProcessingContext,
+  ): Promise<string> {
     logger.info('Delegating audio message processing', {
       userId,
       fileUrl: fileUrl.substring(0, 50) + '...', // Log partial URL for privacy
     });
 
-    return this.audioProcessor.processAudioMessage(fileUrl, userId);
+    return this.audioProcessor.processAudioMessage(fileUrl, userId, context);
+  }
+
+  async processAudioMessageDetailed(
+    fileUrl: string,
+    userId?: number,
+    context?: ProcessingContext,
+  ): Promise<ProcessorResponse> {
+    return this.audioProcessor.processAudioMessageDetailed(fileUrl, userId, context);
   }
 
   /**
@@ -49,6 +75,7 @@ export class MessageProcessorService {
     fileName: string,
     mimeType: string,
     userId?: number,
+    context?: ProcessingContext,
   ): Promise<string> {
     logger.info('Delegating audio document processing', {
       userId,
@@ -56,7 +83,23 @@ export class MessageProcessorService {
       mimeType,
     });
 
-    return this.audioProcessor.processAudioDocument(fileUrl, fileName, mimeType, userId);
+    return this.audioProcessor.processAudioDocument(fileUrl, fileName, mimeType, userId, context);
+  }
+
+  async processAudioDocumentDetailed(
+    fileUrl: string,
+    fileName: string,
+    mimeType: string,
+    userId?: number,
+    context?: ProcessingContext,
+  ): Promise<ProcessorResponse> {
+    return this.audioProcessor.processAudioDocumentDetailed(
+      fileUrl,
+      fileName,
+      mimeType,
+      userId,
+      context,
+    );
   }
 
   /**

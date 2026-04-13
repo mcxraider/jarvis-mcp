@@ -8,6 +8,7 @@ import OpenAI from 'openai';
 import { logger } from '../../../utils/logger';
 import { GPT_CONSTANTS } from '../constants/gpt.constants';
 import { SIMPLE_CONVERSATION_PROMPT } from '../../../types/gpt.prompts';
+import { MessageProcessingResult } from '../../../types/gpt.types';
 
 /**
  * Processor for handling simple text generation without function calling
@@ -29,7 +30,9 @@ export class SimpleTextProcessor {
     temperature: number,
     message: string,
     userId?: string,
-  ): Promise<string> {
+  ): Promise<MessageProcessingResult> {
+    const startTime = Date.now();
+
     try {
       const completion = await openai.chat.completions.create({
         model,
@@ -47,10 +50,19 @@ export class SimpleTextProcessor {
         temperature,
       });
 
-      return (
-        completion.choices[0]?.message?.content ||
-        "I apologize, but I couldn't generate a response."
-      );
+      return {
+        response:
+          completion.choices[0]?.message?.content ||
+          "I apologize, but I couldn't generate a response.",
+        originalMessage: message,
+        processingTimeMs: Date.now() - startTime,
+        usedFunctionCalling: false,
+        functionCallsCount: 0,
+        model,
+        inputTokens: completion.usage?.prompt_tokens,
+        outputTokens: completion.usage?.completion_tokens,
+        totalTokens: completion.usage?.total_tokens,
+      };
     } catch (error) {
       logger.error('Simple message processing failed', {
         userId,

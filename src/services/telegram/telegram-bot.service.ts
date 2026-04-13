@@ -10,6 +10,7 @@ import { BotActivityService } from './bot-activity.service';
 import { BotStatusService } from './bot-status.service';
 import { TodoistAPIService } from '../external/todoist-api.service';
 import { GPT_CONSTANTS } from '../ai/constants/gpt.constants';
+import { ConversationStoreService, JobStateService, UsageTrackingService } from '../persistence';
 
 /**
  * Service class responsible for managing Telegram bot operations
@@ -25,7 +26,12 @@ export class TelegramBotService {
 
   constructor(
     config: TelegramConfig,
-    messageProcessor: MessageProcessorService
+    messageProcessor: MessageProcessorService,
+    persistence?: {
+      conversationStore?: ConversationStoreService;
+      jobStateService?: JobStateService;
+      usageTrackingService?: UsageTrackingService;
+    },
   ) {
     this.botToken = config.token;
     this.bot = new Telegraf(config.token);
@@ -43,6 +49,9 @@ export class TelegramBotService {
       this.messageProcessor,
       this.activityService,
       this.statusService,
+      persistence?.conversationStore,
+      persistence?.jobStateService,
+      persistence?.usageTrackingService,
     );
 
     this.setupBotHandlers();

@@ -2,6 +2,8 @@
 import { logger } from '../../../utils/logger';
 import { GPTService } from '../../ai';
 import { ToolDispatcher } from '../../../types/tool.types';
+import { ProcessorResponse, ProcessingContext } from '../../../types/processing.types';
+import { UsageTrackingService } from '../../persistence';
 
 /**
  * Service responsible for processing text messages
@@ -9,15 +11,24 @@ import { ToolDispatcher } from '../../../types/tool.types';
 export class TextProcessorService {
   private readonly gptService: GPTService;
 
-  constructor(toolDispatcher?: ToolDispatcher) {
+  constructor(toolDispatcher?: ToolDispatcher, usageTrackingService?: UsageTrackingService) {
     // Initialize GPTService with tool dispatcher for function calling
-    this.gptService = new GPTService(toolDispatcher);
+    this.gptService = new GPTService(toolDispatcher, undefined, usageTrackingService);
   }
 
   /**
    * Processes text messages from users
    */
-  async processTextMessage(text: string, userId?: number): Promise<string> {
+  async processTextMessage(text: string, userId?: number, context?: ProcessingContext): Promise<string> {
+    const result = await this.processTextMessageDetailed(text, userId, context);
+    return result.responseText;
+  }
+
+  async processTextMessageDetailed(
+    text: string,
+    userId?: number,
+    context?: ProcessingContext,
+  ): Promise<ProcessorResponse> {
     logger.info('Processing text message', {
       userId,
       messageLength: text.length,
@@ -25,15 +36,18 @@ export class TextProcessorService {
 
     try {
       // Process the message using GPT
-      const response = await this.gptService.processMessage(text, userId?.toString());
+      const response = await this.gptService.processMessageDetailed(text, userId?.toString(), context);
 
       logger.info('Text message processed successfully', {
         userId,
         messageLength: text.length,
-        responseLength: response.length,
+        responseLength: response.response.length,
       });
 
-      return response;
+      return {
+        responseText: response.response,
+        processingTimeMs: response.processingTimeMs,
+      };
     } catch (error) {
       logger.error('Failed to process text message', {
         userId,
@@ -41,7 +55,9 @@ export class TextProcessorService {
         error: (error as Error).message,
       });
 
-      return this.handleTextProcessingError(error as Error, text);
+      return {
+        responseText: this.handleTextProcessingError(error as Error, text),
+      };
     }
   }
 

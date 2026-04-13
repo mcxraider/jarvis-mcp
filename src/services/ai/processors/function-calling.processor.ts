@@ -11,6 +11,7 @@ import { GPT_CONSTANTS } from '../constants/gpt.constants';
 import { getFunctionCallingSystemPrompt, FINAL_RESPONSE_PROMPT } from '../../../types/gpt.prompts';
 import { GPTToolsService } from '../../tools/todoist-tools.service';
 import { ToolDispatcher, ToolCall } from '../../../types/tool.types';
+import { UsageTrackingService } from '../../persistence';
 
 /**
  * Processor for handling GPT function calling capabilities
@@ -18,7 +19,10 @@ import { ToolDispatcher, ToolCall } from '../../../types/tool.types';
 export class FunctionCallingProcessor {
   private readonly toolsService: GPTToolsService;
 
-  constructor(private readonly toolDispatcher?: ToolDispatcher) {
+  constructor(
+    private readonly toolDispatcher?: ToolDispatcher,
+    private readonly usageTrackingService?: UsageTrackingService,
+  ) {
     this.toolsService = new GPTToolsService(toolDispatcher);
   }
 
@@ -62,6 +66,8 @@ export class FunctionCallingProcessor {
       });
 
       const responseMessage = response.choices[0].message;
+      const initialInputTokens = response.usage?.prompt_tokens || 0;
+      const initialOutputTokens = response.usage?.completion_tokens || 0;
 
       // Log the full GPT response for inspection
       logger.debug('GPT function calling response', {
@@ -89,6 +95,9 @@ export class FunctionCallingProcessor {
           usedFunctionCalling: true,
           functionCallsCount: responseMessage.tool_calls.length,
           model,
+          inputTokens: initialInputTokens,
+          outputTokens: initialOutputTokens,
+          totalTokens: response.usage?.total_tokens,
         };
       }
 
@@ -103,6 +112,9 @@ export class FunctionCallingProcessor {
         usedFunctionCalling: false,
         functionCallsCount: 0,
         model,
+        inputTokens: initialInputTokens,
+        outputTokens: initialOutputTokens,
+        totalTokens: response.usage?.total_tokens,
       };
     } catch (error) {
       logger.error('Function calling processing failed', {
@@ -156,6 +168,17 @@ export class FunctionCallingProcessor {
         })),
       });
 
+      for (const toolCall of toolCalls) {
+        await this.usageTrackingService?.recordEvent({
+          userId,
+          eventType: 'tool_called',
+          metadata: {
+            toolCallId: toolCall.id,
+            functionName: toolCall.function.name,
+          },
+        });
+      }
+
       // Filter out any function names the dispatcher does not support
       const supportedCalls = toolCalls.filter((tc) => {
         if (this.toolDispatcher!.isFunctionSupported(tc.function.name)) return true;
@@ -179,6 +202,18 @@ export class FunctionCallingProcessor {
           error: result.error,
         })),
       });
+
+      for (const result of toolResults) {
+        await this.usageTrackingService?.recordEvent({
+          userId,
+          eventType: 'tool_completed',
+          metadata: {
+            toolCallId: result.tool_call_id,
+            success: !result.error,
+            error: result.error ?? null,
+          },
+        });
+      }
 
       // Generate final response based on tool execution results
       const finalResponse = await this.generateFinalResponse(
