@@ -1,6 +1,11 @@
 import OpenAI from 'openai';
-import { logger } from '../../utils/logger';
 import { ToolDispatcher } from '../../types/tool.types';
+import {
+  estimateOpenAICostUsd,
+  extendTelemetryContext,
+  recordOpenAIRequest,
+} from '../../observability';
+import { getLogger, serializeError } from '../../utils/logger';
 import { GPT_CONSTANTS } from './constants/gpt.constants';
 import { GPTConfig, InternalGPTConfig, MessageProcessingResult } from '../../types/gpt.types';
 import { GPTValidator } from './validators/gpt.validator';
@@ -44,7 +49,7 @@ export class GPTService {
     );
     this.simpleTextProcessor = new SimpleTextProcessor();
 
-    logger.info('GPTService initialized', {
+    getLogger({ requestId: 'startup', component: 'gpt_service' }).info('openai.service.initialized', {
       model: this.config.model,
       maxInputLength: this.config.maxInputLength,
       temperature: this.config.temperature,
@@ -64,12 +69,21 @@ export class GPTService {
     context?: GPTProcessingContext,
   ): Promise<MessageProcessingResult> {
     const startTime = Date.now();
-
-    logger.info('Processing message with GPT', {
-      jobId: context?.jobId,
+    const scopedContext = extendTelemetryContext(context, {
+      requestId: context?.requestId || context?.jobId,
+      component: 'gpt_service',
       userId,
+      chatId: context?.chatId,
+      jobId: context?.jobId,
+      stage: 'openai_chat',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('openai.chat.requested', {
       messageLength: message.length,
       functionCallingEnabled: this.enableFunctionCalling,
+      operation: this.enableFunctionCalling ? 'function_calling' : 'simple_text',
+      model: this.config.model,
     });
 
     const MAX_RETRIES = 3;
@@ -93,8 +107,10 @@ export class GPTService {
         });
 
         let result: MessageProcessingResult;
+        let operation: 'function_calling' | 'simple_text';
 
         if (this.enableFunctionCalling) {
+          operation = 'function_calling';
           result = await this.functionCallingProcessor.processWithFunctionCalling(
             this.openai,
             this.config.model,
@@ -104,14 +120,32 @@ export class GPTService {
             context,
           );
         } else {
+          operation = 'simple_text';
           result = await this.simpleTextProcessor.processSimpleMessage(
             this.openai,
             this.config.model,
             this.config.temperature,
             message,
             userId,
+            context,
           );
         }
+
+        result.usage = result.usage || {
+          promptTokens: result.inputTokens,
+          completionTokens: result.outputTokens,
+          totalTokens: result.totalTokens,
+        };
+        result.inputTokens = result.inputTokens ?? result.usage?.promptTokens;
+        result.outputTokens = result.outputTokens ?? result.usage?.completionTokens;
+        result.totalTokens = result.totalTokens ?? result.usage?.totalTokens;
+        result.estimatedCostUsd =
+          result.estimatedCostUsd ??
+          estimateOpenAICostUsd({
+            model: result.model,
+            promptTokens: result.inputTokens,
+            completionTokens: result.outputTokens,
+          });
 
         await this.usageTrackingService?.recordEvent({
           userId,
@@ -130,18 +164,31 @@ export class GPTService {
           },
         });
 
+        recordOpenAIRequest(
+          { model: result.model, operation, status: 'success' },
+          result.processingTimeMs,
+          result.usage,
+        );
+        logger.info('openai.chat.succeeded', {
+          model: result.model,
+          durationMs: result.processingTimeMs,
+          operation,
+          promptTokens: result.inputTokens,
+          completionTokens: result.outputTokens,
+          totalTokens: result.totalTokens,
+          estimatedCostUsd: result.estimatedCostUsd,
+        });
+
         return result;
       } catch (error) {
         lastError = error as Error;
 
         if (attempt < MAX_RETRIES && GPTErrorHandler.isRetryableError(lastError)) {
           const delay = GPTErrorHandler.getRetryDelay(attempt);
-          logger.warn('Retryable error encountered, retrying', {
-            jobId: context?.jobId,
-            userId,
+          logger.warn('openai.chat.retry_scheduled', {
             attempt,
             delayMs: delay,
-            error: lastError.message,
+            ...serializeError(lastError),
           });
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
@@ -153,13 +200,20 @@ export class GPTService {
 
     const processingTimeMs = Date.now() - startTime;
 
-    logger.error('Message processing failed', {
-      jobId: context?.jobId,
-      userId,
+    logger.error('openai.chat.failed', {
       messageLength: message.length,
-      error: lastError!.message,
       processingTimeMs,
+      model: this.config.model,
+      ...serializeError(lastError),
     });
+    recordOpenAIRequest(
+      {
+        model: this.config.model,
+        operation: this.enableFunctionCalling ? 'function_calling' : 'simple_text',
+        status: 'error',
+      },
+      processingTimeMs,
+    );
 
     await this.usageTrackingService?.recordEvent({
       userId,

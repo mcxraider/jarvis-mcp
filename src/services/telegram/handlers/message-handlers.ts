@@ -1,5 +1,6 @@
 import { Context } from 'telegraf';
-import { logger } from '../../../utils/logger';
+import { extendTelemetryContext, getTelemetryContext } from '../../../observability';
+import { getLogger, serializeError } from '../../../utils/logger';
 import { FileService } from '../file.service';
 import { BotActivityService } from '../bot-activity.service';
 import { TelegramUpdateIntakeService } from '../telegram-update-intake.service';
@@ -18,12 +19,10 @@ export class MessageHandlers {
   async handleText(ctx: Context): Promise<void> {
     if (!ctx.message || !('text' in ctx.message)) return;
 
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
+    const context = this.createMessageContext(ctx, 'text');
+    const logger = getLogger(context);
 
-    logger.info('Received text message', {
-      userId,
-      chatId,
+    logger.info('telegram.message.received', {
       username: ctx.from?.username,
       messageLength: ctx.message.text.length,
     });
@@ -37,12 +36,9 @@ export class MessageHandlers {
         ctx.message.message_id,
       );
       await this.jobService.attachAcknowledgement(enqueued.job.id, ack.message_id);
+      logger.info('telegram.reply.sent', { replyLength: enqueued.acknowledgement.length });
     } catch (error) {
-      logger.error('Error queueing text message', {
-        userId,
-        chatId,
-        error: (error as Error).message,
-      });
+      logger.error('message.route.failed', serializeError(error));
       await this.responseService.sendFailureResponse(
         ctx.chat!.id,
         '❌ Sorry, I had trouble queuing your message.',
@@ -53,12 +49,10 @@ export class MessageHandlers {
   async handleVoice(ctx: Context): Promise<void> {
     if (!ctx.message || !('voice' in ctx.message)) return;
 
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
+    const context = this.createMessageContext(ctx, 'audio');
+    const logger = getLogger(context);
 
-    logger.info('Voice message received', {
-      userId,
-      chatId,
+    logger.info('telegram.message.received', {
       duration: ctx.message.voice.duration,
       fileSize: ctx.message.voice.file_size,
     });
@@ -72,12 +66,9 @@ export class MessageHandlers {
         ctx.message.message_id,
       );
       await this.jobService.attachAcknowledgement(enqueued.job.id, ack.message_id);
+      logger.info('telegram.reply.sent', { replyLength: enqueued.acknowledgement.length });
     } catch (error) {
-      logger.error('Error queueing voice message', {
-        userId,
-        chatId,
-        error: (error as Error).message,
-      });
+      logger.error('message.route.failed', serializeError(error));
       await this.responseService.sendFailureResponse(
         ctx.chat!.id,
         '❌ Sorry, I had trouble queuing your voice message.',
@@ -96,13 +87,11 @@ export class MessageHandlers {
     if (!ctx.message || !('document' in ctx.message)) return;
 
     const document = ctx.message.document;
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
+    const context = this.createMessageContext(ctx, 'audio_document');
+    const logger = getLogger(context);
 
     if (!this.fileService.isAudioFile(document.mime_type)) {
-      logger.info('Non-audio document received', {
-        userId,
-        chatId,
+      logger.info('telegram.message.received', {
         mimeType: document.mime_type,
         fileName: document.file_name,
       });
@@ -123,12 +112,11 @@ export class MessageHandlers {
         ctx.message.message_id,
       );
       await this.jobService.attachAcknowledgement(enqueued.job.id, ack.message_id);
+      logger.info('telegram.reply.sent', { replyLength: enqueued.acknowledgement.length });
     } catch (error) {
-      logger.error('Error queueing audio document', {
-        userId,
-        chatId,
+      logger.error('message.route.failed', {
         fileName: document.file_name,
-        error: (error as Error).message,
+        ...serializeError(error),
       });
       await this.responseService.sendFailureResponse(
         ctx.chat!.id,
@@ -138,12 +126,9 @@ export class MessageHandlers {
   }
 
   async handleUnknown(ctx: Context): Promise<void> {
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
+    const logger = getLogger(this.createMessageContext(ctx, 'unknown'));
 
-    logger.info('Unhandled message type received', {
-      userId,
-      chatId,
+    logger.info('telegram.message.received', {
       messageType: 'unknown',
     });
     this.activityService.recordActivity('message_unknown');
@@ -157,12 +142,9 @@ export class MessageHandlers {
   private async processAudioFile(ctx: Context): Promise<void> {
     if (!ctx.message || !('audio' in ctx.message)) return;
 
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
+    const logger = getLogger(this.createMessageContext(ctx, 'audio'));
 
-    logger.info('Audio file received', {
-      userId,
-      chatId,
+    logger.info('telegram.message.received', {
       fileName: ctx.message.audio.file_name || 'audio_file',
       mimeType: ctx.message.audio.mime_type,
       fileSize: ctx.message.audio.file_size,
@@ -177,16 +159,27 @@ export class MessageHandlers {
         ctx.message.message_id,
       );
       await this.jobService.attachAcknowledgement(enqueued.job.id, ack.message_id);
+      logger.info('telegram.reply.sent', { replyLength: enqueued.acknowledgement.length });
     } catch (error) {
-      logger.error('Error queueing audio file', {
-        userId,
-        chatId,
-        error: (error as Error).message,
-      });
+      logger.error('message.route.failed', serializeError(error));
       await this.responseService.sendFailureResponse(
         ctx.chat!.id,
         '❌ Sorry, I had trouble queuing your audio file.',
       );
     }
+  }
+
+  private createMessageContext(
+    ctx: Context,
+    messageType: 'text' | 'audio' | 'audio_document' | 'unknown',
+  ) {
+    return extendTelemetryContext(getTelemetryContext(), {
+      chatId: ctx.chat?.id,
+      userId: ctx.from?.id ? String(ctx.from.id) : undefined,
+      updateId: (ctx.update as any)?.update_id,
+      messageType,
+      component: 'telegram_message',
+      stage: 'received',
+    });
   }
 }

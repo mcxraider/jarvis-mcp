@@ -66,7 +66,13 @@ describe('createWebhookRouter', () => {
     );
 
     expect(response.sendStatus).toHaveBeenCalledWith(200);
-    expect(handleUpdate).toHaveBeenCalledWith(update);
+    expect(handleUpdate).toHaveBeenCalledWith(
+      update,
+      expect.objectContaining({
+        component: 'webhook',
+        updateId: 42,
+      }),
+    );
   });
 
   it('returns 500 when bot update handling fails', async () => {

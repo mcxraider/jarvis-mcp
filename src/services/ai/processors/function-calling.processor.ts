@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
-import { logger } from '../../../utils/logger';
+import { extendTelemetryContext } from '../../../observability';
+import { getLogger, serializeError } from '../../../utils/logger';
 import { MessageProcessingResult } from '../../../types/gpt.types';
 import { GPT_CONSTANTS } from '../constants/gpt.constants';
 import { getFunctionCallingSystemPrompt, FINAL_RESPONSE_PROMPT } from '../../../types/gpt.prompts';
@@ -27,6 +28,15 @@ export class FunctionCallingProcessor {
     context?: GPTProcessingContext,
   ): Promise<MessageProcessingResult> {
     const startTime = Date.now();
+    const logger = getLogger(
+      extendTelemetryContext(context, {
+        requestId: context?.requestId || context?.jobId,
+        component: 'function_calling_processor',
+        userId,
+        chatId: context?.chatId,
+        jobId: context?.jobId,
+      }),
+    );
 
     try {
       const response = await openai.chat.completions.create({
@@ -48,15 +58,16 @@ export class FunctionCallingProcessor {
       });
 
       const responseMessage = response.choices[0].message;
-      const initialInputTokens = response.usage?.prompt_tokens || 0;
-      const initialOutputTokens = response.usage?.completion_tokens || 0;
+      const usage = {
+        promptTokens: response.usage?.prompt_tokens,
+        completionTokens: response.usage?.completion_tokens,
+        totalTokens: response.usage?.total_tokens,
+      };
 
-      logger.debug('GPT function calling response', {
-        jobId: context?.jobId,
-        userId,
+      logger.debug('openai.chat.succeeded', {
         hasToolCalls: !!(responseMessage.tool_calls && responseMessage.tool_calls.length > 0),
         toolCallsCount: responseMessage.tool_calls?.length || 0,
-        content: responseMessage.content,
+        hasContent: !!responseMessage.content,
       });
 
       if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
@@ -77,9 +88,10 @@ export class FunctionCallingProcessor {
           usedFunctionCalling: true,
           functionCallsCount: responseMessage.tool_calls.length,
           model,
-          inputTokens: initialInputTokens,
-          outputTokens: initialOutputTokens,
-          totalTokens: response.usage?.total_tokens,
+          usage,
+          inputTokens: usage.promptTokens,
+          outputTokens: usage.completionTokens,
+          totalTokens: usage.totalTokens,
         };
       }
 
@@ -91,17 +103,13 @@ export class FunctionCallingProcessor {
         usedFunctionCalling: false,
         functionCallsCount: 0,
         model,
-        inputTokens: initialInputTokens,
-        outputTokens: initialOutputTokens,
-        totalTokens: response.usage?.total_tokens,
+        usage,
+        inputTokens: usage.promptTokens,
+        outputTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
       };
     } catch (error) {
-      logger.error('Function calling processing failed', {
-        jobId: context?.jobId,
-        userId,
-        error: (error as Error).message,
-      });
-
+      logger.error('openai.chat.failed', serializeError(error));
       throw error;
     }
   }
@@ -115,6 +123,16 @@ export class FunctionCallingProcessor {
     userId: string,
     context?: GPTProcessingContext,
   ): Promise<string> {
+    const logger = getLogger(
+      extendTelemetryContext(context, {
+        requestId: context?.requestId || context?.jobId,
+        component: 'tool_dispatch',
+        userId,
+        chatId: context?.chatId,
+        jobId: context?.jobId,
+        stage: 'dispatch',
+      }),
+    );
     if (!this.toolDispatcher || !responseMessage.tool_calls) {
       return "I'd like to help you with that, but I'm currently unable to execute the required actions.";
     }
@@ -129,9 +147,7 @@ export class FunctionCallingProcessor {
         },
       }));
 
-      logger.info('Executing tool calls', {
-        jobId: context?.jobId,
-        userId,
+      logger.info('tool.dispatch.started', {
         toolCalls: toolCalls.map((tc) => ({
           id: tc.id,
           name: tc.function.name,
@@ -156,7 +172,7 @@ export class FunctionCallingProcessor {
         if (this.toolDispatcher!.isFunctionSupported(tc.function.name)) {
           return true;
         }
-        logger.warn('Skipping unsupported function', { name: tc.function.name, userId });
+        logger.warn('tool.call.failed', { name: tc.function.name, reason: 'unsupported_function' });
         return false;
       });
 
@@ -166,14 +182,15 @@ export class FunctionCallingProcessor {
 
       await context?.onStage?.('tools.executing');
       const toolResults = await this.toolDispatcher.executeToolCalls(supportedCalls, {
+        requestId: context?.requestId || context?.jobId,
         userId,
+        chatId: context?.chatId,
         jobId: context?.jobId,
+        messageType: context?.messageType,
         onStage: context?.onStage,
       });
 
-      logger.info('Tool execution completed', {
-        jobId: context?.jobId,
-        userId,
+      logger.info('tool.dispatch.completed', {
         results: toolResults.map((result) => ({
           tool_call_id: result.tool_call_id,
           success: !result.error,
@@ -205,12 +222,7 @@ export class FunctionCallingProcessor {
         toolResults,
       );
     } catch (error) {
-      logger.error('Tool call execution failed', {
-        jobId: context?.jobId,
-        userId,
-        error: (error as Error).message,
-      });
-
+      logger.error('tool.dispatch.failed', serializeError(error));
       return `I encountered an error while trying to help you: ${(error as Error).message}. Please try again or rephrase your request.`;
     }
   }
@@ -260,9 +272,10 @@ export class FunctionCallingProcessor {
         'I completed the requested actions successfully.'
       );
     } catch (error) {
-      logger.error('Failed to generate final response', {
-        error: (error as Error).message,
-      });
+      getLogger({ requestId: 'tool-response', component: 'tool_dispatch' }).error(
+        'openai.chat.failed',
+        serializeError(error),
+      );
 
       const successfulActions = toolResults.filter((result) => !result.error);
       if (successfulActions.length > 0) {

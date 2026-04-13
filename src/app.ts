@@ -123,7 +123,7 @@ export async function initializeApplication(): Promise<AppServices> {
     new AudioJobProcessor(messageProcessor, fileService),
   );
 
-  logger.info('Services initialised', {
+  logger.info('app.services_initialized', {
     databasePath: DATABASE_PATH,
   });
 

@@ -1,4 +1,9 @@
-import { logger } from '../../utils/logger';
+import {
+  extendTelemetryContext,
+  recordMessageProcessingDuration,
+  recordMessageProcessingFailure,
+} from '../../observability';
+import { getLogger, serializeError } from '../../utils/logger';
 import { TextProcessorService } from './processors/text-processor.service';
 import { AudioProcessorService } from './processors/audio-processor.service';
 import { ToolDispatcher } from '../../types/tool.types';
@@ -19,13 +24,8 @@ export class MessageProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<string> {
-    logger.info('Delegating text message processing', {
-      jobId: context?.jobId,
-      userId,
-      messageLength: text.length,
-    });
-
-    return this.textProcessor.processTextMessage(text, userId, context);
+    const result = await this.processTextMessageDetailed(text, userId, context);
+    return result.responseText;
   }
 
   async processTextMessageDetailed(
@@ -33,7 +33,37 @@ export class MessageProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<ProcessorResponse> {
-    return this.textProcessor.processTextMessageDetailed(text, userId, context);
+    const scopedContext = extendTelemetryContext(context, {
+      requestId: context?.requestId || context?.jobId,
+      component: 'message_processor',
+      userId: userId ? String(userId) : context?.userId,
+      chatId: context?.chatId,
+      jobId: context?.jobId,
+      messageType: 'text',
+      stage: 'route',
+    });
+    const logger = getLogger(scopedContext);
+    const startTime = Date.now();
+
+    logger.info('message.route.started', {
+      messageLength: text.length,
+    });
+
+    try {
+      const response = await this.textProcessor.processTextMessageDetailed(text, userId, context);
+      recordMessageProcessingDuration('text', Date.now() - startTime);
+      logger.info('message.route.completed', {
+        durationMs: Date.now() - startTime,
+      });
+      return response;
+    } catch (error) {
+      recordMessageProcessingFailure('text', 'route');
+      logger.error('message.route.failed', {
+        ...serializeError(error),
+        durationMs: Date.now() - startTime,
+      });
+      throw error;
+    }
   }
 
   async processAudioMessage(
@@ -41,13 +71,8 @@ export class MessageProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<string> {
-    logger.info('Delegating audio message processing', {
-      jobId: context?.jobId,
-      userId,
-      fileUrl: fileUrl.substring(0, 50) + '...',
-    });
-
-    return this.audioProcessor.processAudioMessage(fileUrl, userId, context);
+    const result = await this.processAudioMessageDetailed(fileUrl, userId, context);
+    return result.responseText;
   }
 
   async processAudioMessageDetailed(
@@ -55,7 +80,37 @@ export class MessageProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<ProcessorResponse> {
-    return this.audioProcessor.processAudioMessageDetailed(fileUrl, userId, context);
+    const scopedContext = extendTelemetryContext(context, {
+      requestId: context?.requestId || context?.jobId,
+      component: 'message_processor',
+      userId: userId ? String(userId) : context?.userId,
+      chatId: context?.chatId,
+      jobId: context?.jobId,
+      messageType: 'audio',
+      stage: 'route',
+    });
+    const logger = getLogger(scopedContext);
+    const startTime = Date.now();
+
+    logger.info('message.route.started', {
+      hasFileUrl: !!fileUrl,
+    });
+
+    try {
+      const response = await this.audioProcessor.processAudioMessageDetailed(fileUrl, userId, context);
+      recordMessageProcessingDuration('audio', Date.now() - startTime);
+      logger.info('message.route.completed', {
+        durationMs: Date.now() - startTime,
+      });
+      return response;
+    } catch (error) {
+      recordMessageProcessingFailure('audio', 'route');
+      logger.error('message.route.failed', {
+        ...serializeError(error),
+        durationMs: Date.now() - startTime,
+      });
+      throw error;
+    }
   }
 
   async processAudioDocument(
@@ -65,14 +120,14 @@ export class MessageProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<string> {
-    logger.info('Delegating audio document processing', {
-      jobId: context?.jobId,
-      userId,
+    const result = await this.processAudioDocumentDetailed(
+      fileUrl,
       fileName,
       mimeType,
-    });
-
-    return this.audioProcessor.processAudioDocument(fileUrl, fileName, mimeType, userId, context);
+      userId,
+      context,
+    );
+    return result.responseText;
   }
 
   async processAudioDocumentDetailed(
@@ -82,13 +137,44 @@ export class MessageProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<ProcessorResponse> {
-    return this.audioProcessor.processAudioDocumentDetailed(
-      fileUrl,
+    const scopedContext = extendTelemetryContext(context, {
+      requestId: context?.requestId || context?.jobId,
+      component: 'message_processor',
+      userId: userId ? String(userId) : context?.userId,
+      chatId: context?.chatId,
+      jobId: context?.jobId,
+      messageType: 'audio_document',
+      stage: 'route',
+    });
+    const logger = getLogger(scopedContext);
+    const startTime = Date.now();
+
+    logger.info('message.route.started', {
       fileName,
       mimeType,
-      userId,
-      context,
-    );
+    });
+
+    try {
+      const response = await this.audioProcessor.processAudioDocumentDetailed(
+        fileUrl,
+        fileName,
+        mimeType,
+        userId,
+        context,
+      );
+      recordMessageProcessingDuration('audio_document', Date.now() - startTime);
+      logger.info('message.route.completed', {
+        durationMs: Date.now() - startTime,
+      });
+      return response;
+    } catch (error) {
+      recordMessageProcessingFailure('audio_document', 'route');
+      logger.error('message.route.failed', {
+        ...serializeError(error),
+        durationMs: Date.now() - startTime,
+      });
+      throw error;
+    }
   }
 
   async processMessage(
@@ -100,10 +186,16 @@ export class MessageProcessorService {
     },
     userId?: number,
   ): Promise<string> {
-    logger.info('Processing message with automatic routing', {
-      userId,
-      messageType: messageData.type,
-    });
+    const logger = getLogger(
+      extendTelemetryContext(undefined, {
+        component: 'message_processor',
+        userId: userId ? String(userId) : undefined,
+        messageType: messageData.type,
+        stage: 'route',
+      }),
+    );
+
+    logger.info('message.route.started', { messageType: messageData.type });
 
     switch (messageData.type) {
       case 'text':
@@ -121,10 +213,7 @@ export class MessageProcessorService {
           userId,
         );
       default:
-        logger.warn('Unknown message type received', {
-          userId,
-          messageType: messageData.type,
-        });
+        logger.warn('message.route.failed', { messageType: messageData.type });
         return (
           `🤖 I received a message, but I'm not sure how to process this type of content.\n` +
           `📝 Supported types: text messages, voice notes, and audio files.\n` +
