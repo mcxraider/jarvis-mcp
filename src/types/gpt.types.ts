@@ -34,6 +34,11 @@ export interface MessageProcessingResult {
   functionCallsCount: number;
   /** Model used for generation */
   model: string;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;

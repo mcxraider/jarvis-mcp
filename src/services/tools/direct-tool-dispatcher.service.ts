@@ -1,10 +1,5 @@
-/**
- * Direct tool call dispatcher that executes Todoist operations via REST API
- *
- * @module DirectToolCallDispatcher
- */
-
-import { logger } from '../../utils/logger';
+import { extendTelemetryContext, recordToolCall } from '../../observability';
+import { getLogger, serializeError } from '../../utils/logger';
 import {
   ToolCall,
   ToolExecutionContext,
@@ -14,48 +9,17 @@ import {
 } from '../../types/tool.types';
 import { TodoistAPIService } from '../external/todoist-api.service';
 
-/**
- * Service for dispatching tool calls directly to external APIs
- */
 export class DirectToolCallDispatcher implements ToolDispatcher {
   private readonly todoistService: TodoistAPIService;
   private static readonly userWriteLocks = new Map<string, Promise<void>>();
   private readonly executionPolicies: Record<string, ToolExecutionPolicy> = {
-    add_todoist_task: {
-      mutatesState: true,
-      resourceType: 'todoist_task',
-      executionMode: 'ordered_write',
-    },
-    get_todoist_task: {
-      mutatesState: false,
-      resourceType: 'todoist_task',
-      executionMode: 'parallel_read',
-    },
-    get_tasks: {
-      mutatesState: false,
-      resourceType: 'todoist_task',
-      executionMode: 'parallel_read',
-    },
-    update_todoist_task: {
-      mutatesState: true,
-      resourceType: 'todoist_task',
-      executionMode: 'ordered_write',
-    },
-    complete_task: {
-      mutatesState: true,
-      resourceType: 'todoist_task',
-      executionMode: 'ordered_write',
-    },
-    delete_todoist_task: {
-      mutatesState: true,
-      resourceType: 'todoist_task',
-      executionMode: 'ordered_write',
-    },
-    get_completed_todoist_tasks: {
-      mutatesState: false,
-      resourceType: 'todoist_task',
-      executionMode: 'parallel_read',
-    },
+    add_todoist_task: { mutatesState: true, resourceType: 'todoist_task', executionMode: 'ordered_write' },
+    get_todoist_task: { mutatesState: false, resourceType: 'todoist_task', executionMode: 'parallel_read' },
+    get_tasks: { mutatesState: false, resourceType: 'todoist_task', executionMode: 'parallel_read' },
+    update_todoist_task: { mutatesState: true, resourceType: 'todoist_task', executionMode: 'ordered_write' },
+    complete_task: { mutatesState: true, resourceType: 'todoist_task', executionMode: 'ordered_write' },
+    delete_todoist_task: { mutatesState: true, resourceType: 'todoist_task', executionMode: 'ordered_write' },
+    get_completed_todoist_tasks: { mutatesState: false, resourceType: 'todoist_task', executionMode: 'parallel_read' },
   };
 
   constructor() {
@@ -66,25 +30,22 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
 
     this.todoistService = new TodoistAPIService(todoistApiKey);
 
-    logger.info('DirectToolCallDispatcher initialized', {
+    getLogger({ requestId: 'startup', component: 'tool_dispatcher' }).info('tool.dispatcher.initialized', {
       hasTodoistService: !!this.todoistService,
     });
   }
 
-  /**
-   * Executes multiple tool calls in parallel and returns results
-   *
-   * @param toolCalls - Array of function calls from GPT
-   * @param userId - User ID for context/authorization
-   * @returns Promise<ToolResult[]> - Results of all tool executions
-   */
-  async executeToolCalls(
-    toolCalls: ToolCall[],
-    context: ToolExecutionContext,
-  ): Promise<ToolResult[]> {
-    logger.info('Executing tool calls directly', {
-      jobId: context.jobId,
-      userId: context.userId,
+  async executeToolCalls(toolCalls: ToolCall[], context: ToolExecutionContext): Promise<ToolResult[]> {
+    const logger = getLogger(
+      extendTelemetryContext(context, {
+        requestId: context.requestId || context.jobId,
+        component: 'tool_dispatcher',
+        userId: context.userId,
+        chatId: context.chatId,
+        jobId: context.jobId,
+      }),
+    );
+    logger.info('tool.dispatch.started', {
       toolCallsCount: toolCalls.length,
       functionNames: toolCalls.map((tc) => tc.function.name),
     });
@@ -129,23 +90,24 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
     }));
   }
 
-  /**
-   * Executes a single tool call by routing to the appropriate service
-   *
-   * @param toolCall - The function call to execute
-   * @param userId - User ID for context
-   * @returns Promise<any> - The result of the function execution
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async executeToolCall(toolCall: ToolCall, context: ToolExecutionContext): Promise<any> {
+    const logger = getLogger(
+      extendTelemetryContext(context, {
+        requestId: context.requestId || context.jobId,
+        component: 'tool_dispatcher',
+        userId: context.userId,
+        chatId: context.chatId,
+        jobId: context.jobId,
+        stage: 'tool_call',
+      }),
+    );
+    const startTime = Date.now();
+
     try {
       const functionName = toolCall.function.name;
       const parameters = JSON.parse(toolCall.function.arguments);
-      const startTime = Date.now();
 
-      logger.debug('Executing tool call', {
-        jobId: context.jobId,
-        userId: context.userId,
+      logger.info('tool.call.started', {
         functionName,
         toolCallId: toolCall.id,
         parameters: Object.keys(parameters),
@@ -153,40 +115,30 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
 
       const result = await this.routeFunctionCall(functionName, parameters);
 
-      logger.debug('Tool call executed successfully', {
-        jobId: context.jobId,
-        userId: context.userId,
+      logger.info('tool.call.succeeded', {
         functionName,
         toolCallId: toolCall.id,
         hasResult: !!result,
         durationMs: Date.now() - startTime,
       });
+      recordToolCall(functionName, 'success', Date.now() - startTime);
 
       return result;
     } catch (error) {
-      logger.error('Tool call execution error', {
-        jobId: context.jobId,
-        userId: context.userId,
+      logger.error('tool.call.failed', {
         functionName: toolCall.function.name,
         toolCallId: toolCall.id,
-        error: (error as Error).message,
+        ...serializeError(error),
       });
+      recordToolCall(toolCall.function.name, 'error', Date.now() - startTime);
       throw error;
     }
   }
 
-  /**
-   * Routes function calls to appropriate service methods
-   *
-   * @param functionName - Name of the function to call
-   * @param parameters - Function parameters
-   * @returns Promise<any> - Function result
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async routeFunctionCall(functionName: string, parameters: any): Promise<any> {
     switch (functionName) {
       case 'add_todoist_task':
-        return await this.todoistService.addTask({
+        return this.todoistService.addTask({
           content: parameters.content,
           description: parameters.description,
           project_id: parameters.project_id,
@@ -200,12 +152,10 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
           due_datetime: parameters.due_datetime,
           assignee_id: parameters.assignee_id,
         });
-
       case 'get_todoist_task':
-        return await this.todoistService.getTask(parameters.task_id);
-
+        return this.todoistService.getTask(parameters.task_id);
       case 'get_tasks':
-        return await this.todoistService.getTasks({
+        return this.todoistService.getTasks({
           project_id: parameters.project_id,
           section_id: parameters.section_id,
           label: parameters.label,
@@ -213,9 +163,8 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
           lang: parameters.lang,
           ids: parameters.ids,
         });
-
       case 'update_todoist_task':
-        return await this.todoistService.updateTask(parameters.task_id, {
+        return this.todoistService.updateTask(parameters.task_id, {
           content: parameters.content,
           description: parameters.description,
           labels: parameters.labels,
@@ -225,34 +174,25 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
           due_datetime: parameters.due_datetime,
           assignee_id: parameters.assignee_id,
         });
-
       case 'complete_task':
         await this.todoistService.completeTask(parameters.task_id);
         return { success: true, message: `Task ${parameters.task_id} marked as completed` };
-
       case 'delete_todoist_task':
         await this.todoistService.deleteTask(parameters.task_id);
         return { success: true, message: `Task ${parameters.task_id} deleted permanently` };
-
       case 'get_completed_todoist_tasks':
-        return await this.todoistService.getCompletedTasks({
+        return this.todoistService.getCompletedTasks({
           since: parameters.since,
           until: parameters.until,
           project_id: parameters.project_id,
           limit: parameters.limit,
           offset: parameters.offset,
         });
-
       default:
         throw new Error(`Unknown function: ${functionName}`);
     }
   }
 
-  /**
-   * Get list of supported function names
-   *
-   * @returns string[] - Array of supported function names
-   */
   getSupportedFunctions(): string[] {
     return [
       'add_todoist_task',
@@ -265,12 +205,6 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
     ];
   }
 
-  /**
-   * Check if a function is supported
-   *
-   * @param functionName - Function name to check
-   * @returns boolean - True if supported
-   */
   isFunctionSupported(functionName: string): boolean {
     return this.getSupportedFunctions().includes(functionName);
   }

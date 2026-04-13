@@ -1,37 +1,30 @@
-/**
- * Simple text processor for GPT service
- *
- * @module SimpleTextProcessor
- */
-
 import OpenAI from 'openai';
-import { logger } from '../../../utils/logger';
+import { extendTelemetryContext } from '../../../observability';
+import { getLogger, serializeError } from '../../../utils/logger';
 import { GPT_CONSTANTS } from '../constants/gpt.constants';
 import { SIMPLE_CONVERSATION_PROMPT } from '../../../types/gpt.prompts';
 import { MessageProcessingResult } from '../../../types/gpt.types';
+import { ProcessingContext } from '../../../types/processing.types';
 
-/**
- * Processor for handling simple text generation without function calling
- */
 export class SimpleTextProcessor {
-  /**
-   * Process message with simple text generation (no function calling)
-   *
-   * @param openai - OpenAI client instance
-   * @param model - Model to use for processing
-   * @param temperature - Temperature setting for the model
-   * @param message - User message
-   * @param userId - User ID (optional)
-   * @returns Promise<string> - Generated response
-   */
   async processSimpleMessage(
     openai: OpenAI,
     model: string,
     temperature: number,
     message: string,
     userId?: string,
+    context?: ProcessingContext,
   ): Promise<MessageProcessingResult> {
     const startTime = Date.now();
+    const logger = getLogger(
+      extendTelemetryContext(context, {
+        requestId: context?.requestId || context?.jobId,
+        component: 'simple_text_processor',
+        userId,
+        chatId: context?.chatId,
+        jobId: context?.jobId,
+      }),
+    );
 
     try {
       const completion = await openai.chat.completions.create({
@@ -59,16 +52,17 @@ export class SimpleTextProcessor {
         usedFunctionCalling: false,
         functionCallsCount: 0,
         model,
+        usage: {
+          promptTokens: completion.usage?.prompt_tokens,
+          completionTokens: completion.usage?.completion_tokens,
+          totalTokens: completion.usage?.total_tokens,
+        },
         inputTokens: completion.usage?.prompt_tokens,
         outputTokens: completion.usage?.completion_tokens,
         totalTokens: completion.usage?.total_tokens,
       };
     } catch (error) {
-      logger.error('Simple message processing failed', {
-        userId,
-        error: (error as Error).message,
-      });
-
+      logger.error('openai.chat.failed', serializeError(error));
       throw error;
     }
   }

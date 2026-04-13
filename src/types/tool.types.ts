@@ -1,3 +1,5 @@
+import { MessageType } from '../observability';
+
 // Interface for OpenAI function calls
 export interface ToolCall {
   id: string;
@@ -25,8 +27,11 @@ export interface ToolExecutionPolicy {
 }
 
 export interface ToolExecutionContext {
+  requestId?: string;
   jobId?: string;
+  chatId?: string;
   userId: string;
+  messageType?: MessageType;
   onStage?: (eventType: string, message?: string) => Promise<void> | void;
 }
 

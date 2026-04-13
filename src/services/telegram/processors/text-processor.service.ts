@@ -1,4 +1,9 @@
-import { logger } from '../../../utils/logger';
+import {
+  extendTelemetryContext,
+  hashContent,
+  recordMessageProcessingFailure,
+} from '../../../observability';
+import { getLogger, serializeError } from '../../../utils/logger';
 import { GPTService } from '../../ai';
 import { ToolDispatcher } from '../../../types/tool.types';
 import { ProcessorResponse, ProcessingContext } from '../../../types/processing.types';
@@ -21,19 +26,27 @@ export class TextProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<ProcessorResponse> {
-    logger.info('Processing text message', {
+    const scopedContext = extendTelemetryContext(context, {
+      requestId: context?.requestId || context?.jobId,
+      component: 'text_processor',
+      userId: userId ? String(userId) : context?.userId,
+      chatId: context?.chatId,
       jobId: context?.jobId,
-      userId,
+      messageType: 'text',
+      stage: 'process',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', {
       messageLength: text.length,
+      messageHash: hashContent(text),
     });
 
     try {
       await context?.onStage?.('gpt.processing');
       const response = await this.gptService.processMessageDetailed(text, userId?.toString(), context);
 
-      logger.info('Text message processed successfully', {
-        jobId: context?.jobId,
-        userId,
+      logger.info('message.route.completed', {
         messageLength: text.length,
         responseLength: response.response.length,
       });
@@ -43,11 +56,10 @@ export class TextProcessorService {
         processingTimeMs: response.processingTimeMs,
       };
     } catch (error) {
-      logger.error('Failed to process text message', {
-        jobId: context?.jobId,
-        userId,
+      recordMessageProcessingFailure('text', 'text_processor');
+      logger.error('message.route.failed', {
         messageLength: text.length,
-        error: (error as Error).message,
+        ...serializeError(error),
       });
 
       return {
@@ -76,7 +88,7 @@ export class TextProcessorService {
 
     return (
       `I encountered an issue processing your request.\n` +
-      `💭 Your message: "${text.length > 100 ? text.substring(0, 100) + '...' : text}"\n\n` +
+      `💭 Message length: ${text.length} characters\n\n` +
       `🔄 Please try again, and I'll do my best to help!`
     );
   }

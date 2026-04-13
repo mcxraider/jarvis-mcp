@@ -1,4 +1,8 @@
-import { logger } from '../../../utils/logger';
+import {
+  extendTelemetryContext,
+  recordMessageProcessingFailure,
+} from '../../../observability';
+import { getLogger, serializeError } from '../../../utils/logger';
 import { WhisperService } from '../../ai/whisper.service';
 import { GPTService } from '../../ai/gpt.service';
 import { ProcessorResponse, ProcessingContext } from '../../../types/processing.types';
@@ -35,10 +39,19 @@ export class AudioProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<ProcessorResponse> {
-    logger.info('Processing audio message', {
+    const scopedContext = extendTelemetryContext(context, {
+      requestId: context?.requestId || context?.jobId,
+      component: 'audio_processor',
+      userId: userId ? String(userId) : context?.userId,
+      chatId: context?.chatId,
       jobId: context?.jobId,
-      userId,
-      fileUrl: fileUrl.substring(0, 50) + '...',
+      messageType: 'audio',
+      stage: 'process',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', {
+      hasFileUrl: !!fileUrl,
     });
 
     try {
@@ -68,12 +81,7 @@ export class AudioProcessorService {
           transcriptionText: text,
         };
       } catch (gptError) {
-        logger.warn('Failed to process transcribed audio with GPT', {
-          jobId: context?.jobId,
-          userId,
-          transcribedText: text.substring(0, 100),
-          error: (gptError as Error).message,
-        });
+        logger.warn('openai.chat.failed', serializeError(gptError));
 
         return {
           responseText:
@@ -86,11 +94,8 @@ export class AudioProcessorService {
         };
       }
     } catch (error) {
-      logger.error('Failed to process audio message', {
-        jobId: context?.jobId,
-        userId,
-        error: (error as Error).message,
-      });
+      recordMessageProcessingFailure('audio', 'audio_processor');
+      logger.error('message.route.failed', serializeError(error));
 
       return {
         responseText: this.handleAudioProcessingError(error as Error),
@@ -122,9 +127,18 @@ export class AudioProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<ProcessorResponse> {
-    logger.info('Processing audio document', {
+    const scopedContext = extendTelemetryContext(context, {
+      requestId: context?.requestId || context?.jobId,
+      component: 'audio_processor',
+      userId: userId ? String(userId) : context?.userId,
+      chatId: context?.chatId,
       jobId: context?.jobId,
-      userId,
+      messageType: 'audio_document',
+      stage: 'process',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', {
       fileName,
       mimeType,
     });
@@ -159,12 +173,9 @@ export class AudioProcessorService {
           transcriptionText: text,
         };
       } catch (gptError) {
-        logger.warn('Failed to process transcribed audio document with GPT', {
-          jobId: context?.jobId,
-          userId,
+        logger.warn('openai.chat.failed', {
           fileName,
-          transcribedText: text.substring(0, 100),
-          error: (gptError as Error).message,
+          ...serializeError(gptError),
         });
 
         return {
@@ -179,12 +190,11 @@ export class AudioProcessorService {
         };
       }
     } catch (error) {
-      logger.error('Failed to process audio document', {
-        jobId: context?.jobId,
-        userId,
+      recordMessageProcessingFailure('audio_document', 'audio_processor');
+      logger.error('message.route.failed', {
         fileName,
         mimeType,
-        error: (error as Error).message,
+        ...serializeError(error),
       });
 
       return {

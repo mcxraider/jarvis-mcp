@@ -1,4 +1,4 @@
-import { logger } from '../../utils/logger';
+import { logger, getLogger, serializeError } from '../../utils/logger';
 import { Telegraf, Context } from 'telegraf';
 import { Message } from 'telegraf/typings/core/types/typegram';
 import { TelegramHandlers } from './handlers/telegram-handlers';
@@ -12,6 +12,13 @@ import { ConversationStoreService, UsageTrackingService } from '../persistence';
 import { TelegramUpdateIntakeService } from './telegram-update-intake.service';
 import { TelegramResponseService } from './telegram-response.service';
 import { JobService } from '../jobs/job.service';
+import {
+  extendTelemetryContext,
+  getTelemetryContext,
+  recordTelegramUpdate,
+  runWithTelemetryContext,
+  TelemetryContext,
+} from '../../observability';
 
 export class TelegramBotService {
   public readonly bot: Telegraf<Context>;
@@ -56,7 +63,7 @@ export class TelegramBotService {
     this.setupBotHandlers();
     this.setupErrorHandling();
 
-    logger.info('Telegram bot initialized successfully');
+    logger.info('telegram.bot.initialized');
   }
 
   private setupBotHandlers(): void {
@@ -66,19 +73,25 @@ export class TelegramBotService {
   private setupErrorHandling(): void {
     this.bot.catch(async (err: unknown, ctx: Context) => {
       const error = err as Error;
-      logger.error('Bot error occurred', {
-        error: error.message,
-        stack: error.stack,
-        userId: ctx.from?.id,
-        chatId: ctx.chat?.id,
+      const context = extendTelemetryContext(this.getContextFromTelegram(ctx), {
+        component: 'telegram_bot',
+        stage: 'bot_error',
+      });
+      const scopedLogger = getLogger(context);
+
+      scopedLogger.error('telegram.update.failed', {
+        ...serializeError(error),
       });
 
       try {
         await ctx.reply('❌ Sorry, something went wrong. Please try again.');
+        scopedLogger.info('telegram.reply.sent', {
+          replyLength: 47,
+        });
       } catch (replyError) {
-        logger.error('Failed to send error message', {
-          originalError: error.message,
-          replyError: (replyError as Error).message,
+        scopedLogger.error('telegram.reply.failed', {
+          ...serializeError(replyError),
+          originalErrorMessage: error.message,
         });
       }
     });
@@ -88,7 +101,7 @@ export class TelegramBotService {
     try {
       const fullWebhookUrl = `${webhookUrl}/webhook/${secretToken}`;
 
-      logger.info('Setting up webhook', { url: fullWebhookUrl });
+      logger.info('telegram.webhook.setup_requested', { webhookUrl });
 
       await this.syncCommands();
 
@@ -98,10 +111,10 @@ export class TelegramBotService {
         drop_pending_updates: true,
       });
 
-      logger.info('Webhook configured successfully');
+      logger.info('telegram.webhook.configured');
     } catch (error) {
-      logger.error('Failed to set webhook', {
-        error: (error as Error).message,
+      logger.error('telegram.webhook.failed', {
+        ...serializeError(error),
         webhookUrl,
       });
       throw new Error(`Webhook setup failed: ${(error as Error).message}`);
@@ -110,40 +123,64 @@ export class TelegramBotService {
 
   async removeWebhook(): Promise<void> {
     await this.bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    logger.info('Webhook removed successfully');
+    logger.info('telegram.webhook.removed');
   }
 
-  async handleUpdate(update: any): Promise<void> {
+  async handleUpdate(update: any, context?: TelemetryContext): Promise<void> {
+    const enrichedContext = extendTelemetryContext(context, {
+      component: 'telegram_update',
+      chatId: update?.message?.chat?.id || update?.callback_query?.message?.chat?.id,
+      userId:
+        update?.message?.from?.id?.toString() || update?.callback_query?.from?.id?.toString(),
+      stage: 'update',
+    });
+    const scopedLogger = getLogger(enrichedContext);
+
     try {
-      await this.bot.handleUpdate(update);
+      const updateType = this.getUpdateType(update);
+      scopedLogger.info('telegram.update.received', {
+        updateType,
+      });
+      recordTelegramUpdate(updateType);
+
+      await runWithTelemetryContext(enrichedContext, () => this.bot.handleUpdate(update));
     } catch (error) {
-      logger.error('Error handling Telegram update', {
-        updateId: update.update_id,
-        error: (error as Error).message,
+      scopedLogger.error('telegram.update.failed', {
+        ...serializeError(error),
       });
       throw error;
     }
   }
 
   async sendMessage(chatId: number, text: string, options?: any): Promise<Message.TextMessage> {
-    return this.bot.telegram.sendMessage(chatId, text, options);
+    const scopedLogger = getLogger(
+      this.getContextFromOptions(options, { component: 'telegram_send_message', chatId }),
+    );
+
+    const sentMessage = await this.bot.telegram.sendMessage(chatId, text, options);
+    scopedLogger.info('telegram.reply.sent', {
+      chatId,
+      textLength: text.length,
+    });
+
+    return sentMessage;
   }
 
   async getBotInfo(): Promise<any> {
     const botInfo = await this.bot.telegram.getMe();
-    logger.debug('Retrieved bot info', { username: botInfo.username });
+    logger.debug('telegram.bot.info_retrieved', { username: botInfo.username });
     return botInfo;
   }
 
   async startPolling(): Promise<void> {
     await this.syncCommands();
     await this.bot.launch();
-    logger.info('Bot started polling for updates');
+    logger.info('telegram.bot.polling_started');
   }
 
   async stop(): Promise<void> {
     this.bot.stop();
-    logger.info('Bot stopped successfully');
+    logger.info('telegram.bot.stopped');
   }
 
   private async syncCommands(): Promise<void> {
@@ -151,5 +188,38 @@ export class TelegramBotService {
       { command: 'help', description: 'Show available commands and supported inputs' },
       { command: 'status', description: 'Show bot health, uptime, and dependency status' },
     ]);
+  }
+
+  private getUpdateType(update: any): string {
+    if (update?.message?.voice) return 'voice';
+    if (update?.message?.audio) return 'audio';
+    if (update?.message?.document) return 'document';
+    if (update?.message?.text) return 'text';
+    return 'unknown';
+  }
+
+  private getContextFromTelegram(ctx: Context): TelemetryContext | undefined {
+    const currentContext = getTelemetryContext();
+    if (!currentContext) {
+      return undefined;
+    }
+
+    return extendTelemetryContext(currentContext, {
+      updateId: (ctx.update as any)?.update_id,
+      chatId: ctx.chat?.id,
+      userId: ctx.from?.id ? String(ctx.from.id) : undefined,
+    });
+  }
+
+  private getContextFromOptions(
+    options: any,
+    fallback: Partial<TelemetryContext>,
+  ): TelemetryContext | undefined {
+    if (options?.telemetryContext) {
+      return extendTelemetryContext(options.telemetryContext, fallback);
+    }
+
+    const currentContext = getTelemetryContext();
+    return currentContext ? extendTelemetryContext(currentContext, fallback) : undefined;
   }
 }
