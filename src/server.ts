@@ -1,6 +1,11 @@
 // src/server.ts — Express setup, webhook registration, graceful shutdown
 import express, { Request, Response, NextFunction } from 'express';
-import { logger } from './utils/logger';
+import {
+  getMetricsContentType,
+  getMetricsSnapshot,
+  recordUncaughtError,
+} from './observability';
+import { logger, serializeError } from './utils/logger';
 import { createWebhookRouter } from './controllers/webhook.controller';
 import { botService } from './app';
 
@@ -12,7 +17,7 @@ const TELEGRAM_SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN!;
   try {
     await botService.setupWebhook(NGROK_URL, TELEGRAM_SECRET_TOKEN);
   } catch (err) {
-    logger.error('Error setting up webhook:', err);
+    logger.error('app.webhook_setup_failed', serializeError(err));
   }
 })();
 
@@ -24,17 +29,43 @@ app.get('/ping', (_req: Request, res: Response, _next: NextFunction) => {
   res.json({ status: 'ok' });
 });
 
+app.get('/metrics', async (_req: Request, res: Response) => {
+  res.setHeader('Content-Type', getMetricsContentType());
+  res.send(await getMetricsSnapshot());
+});
+
 app.use(createWebhookRouter(botService));
 
 // Start listening
 const PORT = process.env.PORT || 3000;
+logger.info('app.starting', { port: PORT });
 app.listen(PORT, () => {
-  logger.info(`Server started at http://localhost:${PORT}`);
-  logger.info(`Waiting for Telegram updates on /webhook/:secret`);
+  logger.info('app.ready', {
+    port: PORT,
+    healthPath: '/ping',
+    metricsPath: '/metrics',
+  });
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  logger.info('Shutting down gracefully...');
+  logger.info('app.shutting_down', { signal: 'SIGTERM' });
   process.exit(0);
+});
+
+process.on('uncaughtException', (error) => {
+  recordUncaughtError('uncaughtException');
+  logger.error('runtime.fatal', {
+    kind: 'uncaughtException',
+    ...serializeError(error),
+  });
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  recordUncaughtError('unhandledRejection');
+  logger.error('runtime.fatal', {
+    kind: 'unhandledRejection',
+    ...serializeError(reason),
+  });
 });

@@ -1,6 +1,10 @@
 // src/services/telegram/handlers/message-handlers.ts
 import { Context } from 'telegraf';
-import { logger } from '../../../utils/logger';
+import {
+  extendTelemetryContext,
+  getTelemetryContext,
+} from '../../../observability';
+import { getLogger, serializeError } from '../../../utils/logger';
 import { FileService } from '../file.service';
 import { MessageProcessorService } from '../message-processor.service';
 import { BotActivityService } from '../bot-activity.service';
@@ -20,21 +24,28 @@ export class MessageHandlers {
 
     const messageText = ctx.message.text;
     const userId = ctx.from?.id;
+    const context = extendTelemetryContext(getTelemetryContext(), {
+      component: 'telegram_message',
+      chatId: ctx.chat?.id,
+      userId: userId ? String(userId) : undefined,
+      messageType: 'text',
+      stage: 'received',
+    });
+    const logger = getLogger(context);
 
-    logger.info('Received text message', {
-      userId,
+    logger.info('telegram.message.received', {
       username: ctx.from?.username,
-      messageLength: messageText.length
+      messageLength: messageText.length,
     });
     this.activityService.recordActivity('message_text');
 
     try {
-      const response = await this.messageProcessor.processTextMessage(messageText, userId);
+      const response = await this.messageProcessor.processTextMessage(messageText, userId, context);
       await ctx.reply(response);
+      logger.info('telegram.reply.sent', { replyLength: response.length });
     } catch (error) {
-      logger.error('Error processing text message', {
-        error: (error as Error).message,
-        userId
+      logger.error('message.route.failed', {
+        ...serializeError(error),
       });
       await ctx.reply('❌ Sorry, I had trouble processing your message.');
     }
@@ -45,23 +56,28 @@ export class MessageHandlers {
 
     const voice = ctx.message.voice;
     const userId = ctx.from?.id;
+    const context = extendTelemetryContext(getTelemetryContext(), {
+      component: 'telegram_message',
+      chatId: ctx.chat?.id,
+      userId: userId ? String(userId) : undefined,
+      messageType: 'audio',
+      stage: 'received',
+    });
+    const logger = getLogger(context);
 
-    logger.info('Voice message received', {
-      userId,
+    logger.info('telegram.message.received', {
       duration: voice.duration,
-      fileSize: voice.file_size
+      fileSize: voice.file_size,
     });
     this.activityService.recordActivity('message_voice');
 
     try {
       const fileUrl = await this.fileService.getFileUrl(voice.file_id);
-      const response = await this.messageProcessor.processAudioMessage(fileUrl, userId);
+      const response = await this.messageProcessor.processAudioMessage(fileUrl, userId, context);
       await ctx.reply(response);
+      logger.info('telegram.reply.sent', { replyLength: response.length });
     } catch (error) {
-      logger.error('Error processing voice message', {
-        error: (error as Error).message,
-        userId
-      });
+      logger.error('message.route.failed', serializeError(error));
       await ctx.reply('❌ Sorry, I had trouble processing your voice message.');
     }
   }
@@ -79,14 +95,21 @@ export class MessageHandlers {
 
     const document = ctx.message.document;
     const userId = ctx.from?.id;
+    const context = extendTelemetryContext(getTelemetryContext(), {
+      component: 'telegram_message',
+      chatId: ctx.chat?.id,
+      userId: userId ? String(userId) : undefined,
+      messageType: 'audio_document',
+      stage: 'received',
+    });
+    const logger = getLogger(context);
 
     if (this.fileService.isAudioFile(document.mime_type)) {
       this.activityService.recordActivity('message_document');
       const fileName = document.file_name || 'audio_file';
       const mimeType = document.mime_type || 'application/octet-stream';
 
-      logger.info('Audio document received', {
-        userId,
+      logger.info('telegram.message.received', {
         fileName,
         mimeType,
         fileSize: document.file_size,
@@ -99,21 +122,21 @@ export class MessageHandlers {
           fileName,
           mimeType,
           userId,
+          context,
         );
         await ctx.reply(response);
+        logger.info('telegram.reply.sent', { replyLength: response.length });
       } catch (error) {
-        logger.error('Error processing audio document', {
-          error: (error as Error).message,
-          userId,
+        logger.error('message.route.failed', {
+          ...serializeError(error),
           fileName,
         });
         await ctx.reply('❌ Sorry, I had trouble processing your audio document.');
       }
     } else {
-      logger.info('Non-audio document received', {
-        userId,
+      logger.info('telegram.message.received', {
         mimeType: document.mime_type,
-        fileName: document.file_name
+        fileName: document.file_name,
       });
       await ctx.reply('📄 I received a document, but I only process audio files. Please send an audio file.');
     }
@@ -121,11 +144,16 @@ export class MessageHandlers {
 
   async handleUnknown(ctx: Context): Promise<void> {
     const userId = ctx.from?.id;
-
-    logger.info('Unhandled message type received', {
-      userId,
-      messageType: 'unknown'
+    const context = extendTelemetryContext(getTelemetryContext(), {
+      component: 'telegram_message',
+      chatId: ctx.chat?.id,
+      userId: userId ? String(userId) : undefined,
+      messageType: 'unknown',
+      stage: 'received',
     });
+    const logger = getLogger(context);
+
+    logger.info('telegram.message.received', { messageType: 'unknown' });
     this.activityService.recordActivity('message_unknown');
 
     await ctx.reply(
@@ -137,23 +165,30 @@ export class MessageHandlers {
     const userId = ctx.from?.id;
     const fileName = audioFile.file_name || 'audio_file';
     const mimeType = audioFile.mime_type;
+    const context = extendTelemetryContext(getTelemetryContext(), {
+      component: 'telegram_message',
+      chatId: ctx.chat?.id,
+      userId: userId ? String(userId) : undefined,
+      messageType: 'audio',
+      stage: 'received',
+    });
+    const logger = getLogger(context);
 
-    logger.info('Audio file received', {
-      userId,
+    logger.info('telegram.message.received', {
       fileName,
       mimeType,
       fileSize: audioFile.file_size,
-      duration: audioFile.duration
+      duration: audioFile.duration,
     });
 
     try {
       const fileUrl = await this.fileService.getFileUrl(audioFile.file_id);
-      const response = await this.messageProcessor.processAudioMessage(fileUrl, userId);
+      const response = await this.messageProcessor.processAudioMessage(fileUrl, userId, context);
       await ctx.reply(response);
+      logger.info('telegram.reply.sent', { replyLength: response.length });
     } catch (error) {
-      logger.error('Error processing audio file', {
-        error: (error as Error).message,
-        userId,
+      logger.error('message.route.failed', {
+        ...serializeError(error),
         fileName
       });
       await ctx.reply('❌ Sorry, I had trouble processing your audio file.');

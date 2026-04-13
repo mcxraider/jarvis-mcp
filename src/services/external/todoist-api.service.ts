@@ -4,8 +4,8 @@
  *
  * @module TodoistAPIService
  */
-
-import { logger } from '../../utils/logger';
+import { extendTelemetryContext, getTelemetryContext } from '../../observability';
+import { createComponentLogger, serializeError } from '../../utils/logger';
 
 /**
  * Todoist API response interfaces
@@ -102,6 +102,10 @@ export class TodoistAPIService {
     method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET',
     body?: any,
   ): Promise<any> {
+    const logger = createComponentLogger(
+      'todoist_api',
+      extendTelemetryContext(getTelemetryContext(), { stage: 'todoist_request' }),
+    );
     const url = `${this.baseURL}${endpoint}`;
 
     const headers: Record<string, string> = {
@@ -119,7 +123,7 @@ export class TodoistAPIService {
     }
 
     try {
-      logger.debug('Making Todoist API request', {
+      logger.debug('todoist.request.started', {
         url,
         method,
         hasBody: !!body,
@@ -139,7 +143,7 @@ export class TodoistAPIService {
 
       const data = await response.json();
 
-      logger.debug('Todoist API response received', {
+      logger.debug('todoist.request.succeeded', {
         url,
         status: response.status,
         hasData: !!data,
@@ -147,10 +151,10 @@ export class TodoistAPIService {
 
       return data;
     } catch (error) {
-      logger.error('Todoist API request failed', {
+      logger.error('todoist.request.failed', {
         url,
         method,
-        error: (error as Error).message,
+        ...serializeError(error),
       });
       throw error;
     }
@@ -163,7 +167,8 @@ export class TodoistAPIService {
    * @returns Promise<TodoistTask> - Created task
    */
   async addTask(payload: CreateTaskPayload): Promise<TodoistTask> {
-    logger.info('Creating Todoist task', {
+    const logger = createComponentLogger('todoist_api', getTelemetryContext());
+    logger.info('todoist.task.create.started', {
       content: payload.content,
       priority: payload.priority,
       hasDescription: !!payload.description,
@@ -171,7 +176,7 @@ export class TodoistAPIService {
 
     const task = await this.makeRequest('/tasks', 'POST', payload);
 
-    logger.info('Todoist task created successfully', {
+    logger.info('todoist.task.create.succeeded', {
       taskId: task.id,
       content: task.content,
     });
@@ -186,11 +191,12 @@ export class TodoistAPIService {
    * @returns Promise<TodoistTask> - Task details
    */
   async getTask(taskId: string): Promise<TodoistTask> {
-    logger.debug('Fetching Todoist task', { taskId });
+    const logger = createComponentLogger('todoist_api', getTelemetryContext());
+    logger.debug('todoist.task.fetch.started', { taskId });
 
     const task = await this.makeRequest(`/tasks/${taskId}`);
 
-    logger.debug('Todoist task retrieved', {
+    logger.debug('todoist.task.fetch.succeeded', {
       taskId: task.id,
       content: task.content,
     });
@@ -214,7 +220,8 @@ export class TodoistAPIService {
       ids?: string[];
     } = {},
   ): Promise<TodoistTask[]> {
-    logger.debug('Fetching Todoist tasks', options);
+    const logger = createComponentLogger('todoist_api', getTelemetryContext());
+    logger.debug('todoist.tasks.fetch.started', options);
 
     const params = new URLSearchParams();
 
@@ -230,7 +237,7 @@ export class TodoistAPIService {
     const endpoint = `/tasks${params.toString() ? '?' + params.toString() : ''}`;
     const tasks = await this.makeRequest(endpoint);
 
-    logger.debug('Todoist tasks retrieved', {
+    logger.debug('todoist.tasks.fetch.succeeded', {
       count: tasks.length,
       filter: options.filter,
     });
@@ -246,7 +253,8 @@ export class TodoistAPIService {
    * @returns Promise<TodoistTask> - Updated task
    */
   async updateTask(taskId: string, payload: UpdateTaskPayload): Promise<TodoistTask> {
-    logger.info('Updating Todoist task', {
+    const logger = createComponentLogger('todoist_api', getTelemetryContext());
+    logger.info('todoist.task.update.started', {
       taskId,
       hasContent: !!payload.content,
       priority: payload.priority,
@@ -254,7 +262,7 @@ export class TodoistAPIService {
 
     const task = await this.makeRequest(`/tasks/${taskId}`, 'PUT', payload);
 
-    logger.info('Todoist task updated successfully', {
+    logger.info('todoist.task.update.succeeded', {
       taskId: task.id,
       content: task.content,
     });
@@ -269,11 +277,12 @@ export class TodoistAPIService {
    * @returns Promise<void>
    */
   async completeTask(taskId: string): Promise<void> {
-    logger.info('Completing Todoist task', { taskId });
+    const logger = createComponentLogger('todoist_api', getTelemetryContext());
+    logger.info('todoist.task.complete.started', { taskId });
 
     await this.makeRequest(`/tasks/${taskId}/close`, 'POST');
 
-    logger.info('Todoist task completed successfully', { taskId });
+    logger.info('todoist.task.complete.succeeded', { taskId });
   }
 
   /**
@@ -283,11 +292,12 @@ export class TodoistAPIService {
    * @returns Promise<void>
    */
   async deleteTask(taskId: string): Promise<void> {
-    logger.info('Deleting Todoist task', { taskId });
+    const logger = createComponentLogger('todoist_api', getTelemetryContext());
+    logger.info('todoist.task.delete.started', { taskId });
 
     await this.makeRequest(`/tasks/${taskId}`, 'DELETE');
 
-    logger.info('Todoist task deleted successfully', { taskId });
+    logger.info('todoist.task.delete.succeeded', { taskId });
   }
 
   /**
@@ -296,11 +306,12 @@ export class TodoistAPIService {
    * @returns Promise<TodoistProject[]> - Array of projects
    */
   async getProjects(): Promise<TodoistProject[]> {
-    logger.debug('Fetching Todoist projects');
+    const logger = createComponentLogger('todoist_api', getTelemetryContext());
+    logger.debug('todoist.projects.fetch.started');
 
     const projects = await this.makeRequest('/projects');
 
-    logger.debug('Todoist projects retrieved', {
+    logger.debug('todoist.projects.fetch.succeeded', {
       count: projects.length,
     });
 
@@ -338,7 +349,8 @@ export class TodoistAPIService {
       offset?: number;
     } = {},
   ): Promise<any[]> {
-    logger.debug('Fetching completed Todoist tasks', options);
+    const logger = createComponentLogger('todoist_api', getTelemetryContext());
+    logger.debug('todoist.completed_tasks.fetch.started', options);
 
     // Note: This uses the Sync API endpoint for completed tasks
     const syncUrl = 'https://api.todoist.com/sync/v9/completed/get_all';
@@ -367,15 +379,13 @@ export class TodoistAPIService {
 
       const data = await response.json();
 
-      logger.debug('Completed Todoist tasks retrieved', {
+      logger.debug('todoist.completed_tasks.fetch.succeeded', {
         count: data.items?.length || 0,
       });
 
       return data.items || [];
     } catch (error) {
-      logger.error('Failed to fetch completed tasks', {
-        error: (error as Error).message,
-      });
+      logger.error('todoist.completed_tasks.fetch.failed', serializeError(error));
       throw error;
     }
   }

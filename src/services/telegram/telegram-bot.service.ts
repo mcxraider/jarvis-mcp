@@ -10,6 +10,14 @@ import { BotActivityService } from './bot-activity.service';
 import { BotStatusService } from './bot-status.service';
 import { TodoistAPIService } from '../external/todoist-api.service';
 import { GPT_CONSTANTS } from '../ai/constants/gpt.constants';
+import {
+  extendTelemetryContext,
+  getTelemetryContext,
+  recordTelegramUpdate,
+  runWithTelemetryContext,
+  TelemetryContext,
+} from '../../observability';
+import { getLogger, serializeError } from '../../utils/logger';
 
 /**
  * Service class responsible for managing Telegram bot operations
@@ -48,7 +56,7 @@ export class TelegramBotService {
     this.setupBotHandlers();
     this.setupErrorHandling();
 
-    logger.info('Telegram bot initialized successfully');
+    logger.info('telegram.bot.initialized');
   }
 
   /**
@@ -64,19 +72,25 @@ export class TelegramBotService {
   private setupErrorHandling(): void {
     this.bot.catch(async (err: unknown, ctx: Context) => {
       const error = err as Error;
-      logger.error('Bot error occurred', {
-        error: error.message,
-        stack: error.stack,
-        userId: ctx.from?.id,
-        chatId: ctx.chat?.id
+      const context = extendTelemetryContext(this.getContextFromTelegram(ctx), {
+        component: 'telegram_bot',
+        stage: 'bot_error',
+      });
+      const scopedLogger = getLogger(context);
+
+      scopedLogger.error('telegram.update.failed', {
+        ...serializeError(error),
       });
 
       try {
         await ctx.reply('❌ Sorry, something went wrong. Please try again.');
+        scopedLogger.info('telegram.reply.sent', {
+          replyLength: 47,
+        });
       } catch (replyError) {
-        logger.error('Failed to send error message', {
-          originalError: error.message,
-          replyError: (replyError as Error).message
+        scopedLogger.error('telegram.reply.failed', {
+          ...serializeError(replyError),
+          originalErrorMessage: error.message,
         });
       }
     });
@@ -89,7 +103,7 @@ export class TelegramBotService {
     try {
       const fullWebhookUrl = `${webhookUrl}/webhook/${secretToken}`;
 
-      logger.info('Setting up webhook', { url: fullWebhookUrl });
+      logger.info('telegram.webhook.setup_requested', { webhookUrl });
 
       await this.syncCommands();
 
@@ -99,11 +113,11 @@ export class TelegramBotService {
         drop_pending_updates: true
       });
 
-      logger.info('Webhook configured successfully');
+      logger.info('telegram.webhook.configured');
     } catch (error) {
-      logger.error('Failed to set webhook', {
-        error: (error as Error).message,
-        webhookUrl
+      logger.error('telegram.webhook.failed', {
+        ...serializeError(error),
+        webhookUrl,
       });
       throw new Error(`Webhook setup failed: ${(error as Error).message}`);
     }
@@ -115,11 +129,9 @@ export class TelegramBotService {
   async removeWebhook(): Promise<void> {
     try {
       await this.bot.telegram.deleteWebhook({ drop_pending_updates: true });
-      logger.info('Webhook removed successfully');
+      logger.info('telegram.webhook.removed');
     } catch (error) {
-      logger.error('Failed to remove webhook', {
-        error: (error as Error).message
-      });
+      logger.error('telegram.webhook.remove_failed', serializeError(error));
       throw error;
     }
   }
@@ -127,13 +139,25 @@ export class TelegramBotService {
   /**
    * Handles incoming updates from Telegram webhook
    */
-  async handleUpdate(update: any): Promise<void> {
+  async handleUpdate(update: any, context: TelemetryContext): Promise<void> {
+    const enrichedContext = extendTelemetryContext(context, {
+      component: 'telegram_update',
+      chatId: update?.message?.chat?.id || update?.callback_query?.message?.chat?.id,
+      userId: update?.message?.from?.id ? String(update.message.from.id) : undefined,
+      stage: 'update',
+    });
+    const scopedLogger = getLogger(enrichedContext);
+
     try {
-      await this.bot.handleUpdate(update);
+      scopedLogger.info('telegram.update.received', {
+        updateType: this.getUpdateType(update),
+      });
+      recordTelegramUpdate(this.getUpdateType(update));
+
+      await runWithTelemetryContext(enrichedContext, () => this.bot.handleUpdate(update));
     } catch (error) {
-      logger.error('Error handling Telegram update', {
-        updateId: update.update_id,
-        error: (error as Error).message
+      scopedLogger.error('telegram.update.failed', {
+        ...serializeError(error),
       });
       throw error;
     }
@@ -147,13 +171,21 @@ export class TelegramBotService {
     text: string,
     options?: any
   ): Promise<Message.TextMessage> {
+    const scopedLogger = getLogger(
+      this.getContextFromOptions(options, { component: 'telegram_send_message', chatId }),
+    );
     try {
-      return await this.bot.telegram.sendMessage(chatId, text, options);
-    } catch (error) {
-      logger.error('Failed to send message', {
+      const sentMessage = await this.bot.telegram.sendMessage(chatId, text, options);
+      scopedLogger.info('telegram.reply.sent', {
         chatId,
         textLength: text.length,
-        error: (error as Error).message
+      });
+      return sentMessage;
+    } catch (error) {
+      scopedLogger.error('telegram.reply.failed', {
+        chatId,
+        textLength: text.length,
+        ...serializeError(error),
       });
       throw error;
     }
@@ -165,12 +197,10 @@ export class TelegramBotService {
   async getBotInfo(): Promise<any> {
     try {
       const botInfo = await this.bot.telegram.getMe();
-      logger.debug('Retrieved bot info', { username: botInfo.username });
+      logger.debug('telegram.bot.info_retrieved', { username: botInfo.username });
       return botInfo;
     } catch (error) {
-      logger.error('Failed to get bot info', {
-        error: (error as Error).message
-      });
+      logger.error('telegram.bot.info_failed', serializeError(error));
       throw error;
     }
   }
@@ -182,11 +212,9 @@ export class TelegramBotService {
     try {
       await this.syncCommands();
       await this.bot.launch();
-      logger.info('Bot started polling for updates');
+      logger.info('telegram.bot.polling_started');
     } catch (error) {
-      logger.error('Failed to start polling', {
-        error: (error as Error).message
-      });
+      logger.error('telegram.bot.polling_failed', serializeError(error));
       throw error;
     }
   }
@@ -197,11 +225,9 @@ export class TelegramBotService {
   async stop(): Promise<void> {
     try {
       this.bot.stop();
-      logger.info('Bot stopped successfully');
+      logger.info('telegram.bot.stopped');
     } catch (error) {
-      logger.error('Error stopping bot', {
-        error: (error as Error).message
-      });
+      logger.error('telegram.bot.stop_failed', serializeError(error));
     }
   }
 
@@ -210,5 +236,37 @@ export class TelegramBotService {
       { command: 'help', description: 'Show available commands and supported inputs' },
       { command: 'status', description: 'Show bot health, uptime, and dependency status' },
     ]);
+  }
+
+  private getUpdateType(update: any): string {
+    if (update?.message?.voice) return 'voice';
+    if (update?.message?.audio) return 'audio';
+    if (update?.message?.document) return 'document';
+    if (update?.message?.text) return 'text';
+    return 'unknown';
+  }
+
+  private getContextFromTelegram(ctx: Context): TelemetryContext | undefined {
+    const currentContext = getTelemetryContext();
+    if (!currentContext) {
+      return undefined;
+    }
+
+    return extendTelemetryContext(currentContext, {
+      updateId: (ctx.update as any)?.update_id,
+      chatId: ctx.chat?.id,
+      userId: ctx.from?.id ? String(ctx.from.id) : undefined,
+    });
+  }
+
+  private getContextFromOptions(
+    options: any,
+    fallback: Partial<TelemetryContext>,
+  ): TelemetryContext | undefined {
+    if (options?.telemetryContext) {
+      return extendTelemetryContext(options.telemetryContext, fallback);
+    }
+    const currentContext = getTelemetryContext();
+    return currentContext ? extendTelemetryContext(currentContext, fallback) : undefined;
   }
 }

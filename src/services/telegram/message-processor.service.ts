@@ -1,5 +1,11 @@
 // src/services/telegram/message-processor.service.ts
-import { logger } from '../../utils/logger';
+import {
+  TelemetryContext,
+  extendTelemetryContext,
+  recordMessageProcessingDuration,
+  recordMessageProcessingFailure,
+} from '../../observability';
+import { getLogger, serializeError } from '../../utils/logger';
 import { TextProcessorService } from './processors/text-processor.service';
 import { AudioProcessorService } from './processors/audio-processor.service';
 import { ToolDispatcher } from '../../types/tool.types';
@@ -20,25 +26,73 @@ export class MessageProcessorService {
   /**
    * Processes text messages from users
    */
-  async processTextMessage(text: string, userId?: number): Promise<string> {
-    logger.info('Delegating text message processing', {
-      userId,
+  async processTextMessage(
+    text: string,
+    userId?: number,
+    context?: TelemetryContext,
+  ): Promise<string> {
+    const scopedContext = extendTelemetryContext(context, {
+      component: 'message_processor',
+      userId: userId ? String(userId) : undefined,
+      messageType: 'text',
+      stage: 'route',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', {
       messageLength: text.length,
     });
 
-    return this.textProcessor.processTextMessage(text, userId);
+    const startTime = Date.now();
+    try {
+      const response = await this.textProcessor.processTextMessage(text, userId, scopedContext);
+      recordMessageProcessingDuration('text', Date.now() - startTime);
+      logger.info('message.route.completed', { durationMs: Date.now() - startTime });
+      return response;
+    } catch (error) {
+      recordMessageProcessingFailure('text', 'route');
+      logger.error('message.route.failed', {
+        ...serializeError(error),
+        durationMs: Date.now() - startTime,
+      });
+      throw error;
+    }
   }
 
   /**
    * Processes audio messages (voice notes, audio files)
    */
-  async processAudioMessage(fileUrl: string, userId?: number): Promise<string> {
-    logger.info('Delegating audio message processing', {
-      userId,
-      fileUrl: fileUrl.substring(0, 50) + '...', // Log partial URL for privacy
+  async processAudioMessage(
+    fileUrl: string,
+    userId?: number,
+    context?: TelemetryContext,
+  ): Promise<string> {
+    const scopedContext = extendTelemetryContext(context, {
+      component: 'message_processor',
+      userId: userId ? String(userId) : undefined,
+      messageType: 'audio',
+      stage: 'route',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', {
+      hasFileUrl: !!fileUrl,
     });
 
-    return this.audioProcessor.processAudioMessage(fileUrl, userId);
+    const startTime = Date.now();
+    try {
+      const response = await this.audioProcessor.processAudioMessage(fileUrl, userId, scopedContext);
+      recordMessageProcessingDuration('audio', Date.now() - startTime);
+      logger.info('message.route.completed', { durationMs: Date.now() - startTime });
+      return response;
+    } catch (error) {
+      recordMessageProcessingFailure('audio', 'route');
+      logger.error('message.route.failed', {
+        ...serializeError(error),
+        durationMs: Date.now() - startTime,
+      });
+      throw error;
+    }
   }
 
   /**
@@ -49,14 +103,41 @@ export class MessageProcessorService {
     fileName: string,
     mimeType: string,
     userId?: number,
+    context?: TelemetryContext,
   ): Promise<string> {
-    logger.info('Delegating audio document processing', {
-      userId,
+    const scopedContext = extendTelemetryContext(context, {
+      component: 'message_processor',
+      userId: userId ? String(userId) : undefined,
+      messageType: 'audio_document',
+      stage: 'route',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', {
       fileName,
       mimeType,
     });
 
-    return this.audioProcessor.processAudioDocument(fileUrl, fileName, mimeType, userId);
+    const startTime = Date.now();
+    try {
+      const response = await this.audioProcessor.processAudioDocument(
+        fileUrl,
+        fileName,
+        mimeType,
+        userId,
+        scopedContext,
+      );
+      recordMessageProcessingDuration('audio_document', Date.now() - startTime);
+      logger.info('message.route.completed', { durationMs: Date.now() - startTime });
+      return response;
+    } catch (error) {
+      recordMessageProcessingFailure('audio_document', 'route');
+      logger.error('message.route.failed', {
+        ...serializeError(error),
+        durationMs: Date.now() - startTime,
+      });
+      throw error;
+    }
   }
 
   /**
@@ -72,10 +153,15 @@ export class MessageProcessorService {
     },
     userId?: number,
   ): Promise<string> {
-    logger.info('Processing message with automatic routing', {
-      userId,
+    const scopedContext = extendTelemetryContext(undefined, {
+      component: 'message_processor',
+      userId: userId ? String(userId) : undefined,
       messageType: messageData.type,
+      stage: 'route',
     });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', { messageType: messageData.type });
 
     switch (messageData.type) {
       case 'text':
@@ -96,10 +182,7 @@ export class MessageProcessorService {
         );
 
       default:
-        logger.warn('Unknown message type received', {
-          userId,
-          messageType: messageData.type,
-        });
+        logger.warn('message.route.failed', { messageType: messageData.type });
         return (
           `🤖 I received a message, but I'm not sure how to process this type of content.\n` +
           `📝 Supported types: text messages, voice notes, and audio files.\n` +

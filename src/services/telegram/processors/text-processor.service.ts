@@ -1,5 +1,11 @@
 // src/services/telegram/processors/text-processor.service.ts
-import { logger } from '../../../utils/logger';
+import {
+  TelemetryContext,
+  extendTelemetryContext,
+  hashContent,
+  recordMessageProcessingFailure,
+} from '../../../observability';
+import { getLogger, serializeError } from '../../../utils/logger';
 import { GPTService } from '../../ai';
 import { ToolDispatcher } from '../../../types/tool.types';
 
@@ -17,28 +23,39 @@ export class TextProcessorService {
   /**
    * Processes text messages from users
    */
-  async processTextMessage(text: string, userId?: number): Promise<string> {
-    logger.info('Processing text message', {
-      userId,
+  async processTextMessage(
+    text: string,
+    userId?: number,
+    context?: TelemetryContext,
+  ): Promise<string> {
+    const scopedContext = extendTelemetryContext(context, {
+      component: 'text_processor',
+      userId: userId ? String(userId) : undefined,
+      messageType: 'text',
+      stage: 'process',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', {
       messageLength: text.length,
+      messageHash: hashContent(text),
     });
 
     try {
       // Process the message using GPT
-      const response = await this.gptService.processMessage(text, userId?.toString());
+      const response = await this.gptService.processMessage(text, userId?.toString(), scopedContext);
 
-      logger.info('Text message processed successfully', {
-        userId,
+      logger.info('message.route.completed', {
         messageLength: text.length,
         responseLength: response.length,
       });
 
       return response;
     } catch (error) {
-      logger.error('Failed to process text message', {
-        userId,
+      recordMessageProcessingFailure('text', 'text_processor');
+      logger.error('message.route.failed', {
         messageLength: text.length,
-        error: (error as Error).message,
+        ...serializeError(error),
       });
 
       return this.handleTextProcessingError(error as Error, text);
@@ -69,7 +86,7 @@ export class TextProcessorService {
     // Fallback response for other errors
     return (
       `I encountered an issue processing your request.\n` +
-      `💭 Your message: "${text.length > 100 ? text.substring(0, 100) + '...' : text}"\n\n` +
+      `💭 Message length: ${text.length} characters\n\n` +
       `🔄 Please try again, and I'll do my best to help!`
     );
   }

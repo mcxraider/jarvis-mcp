@@ -1,6 +1,7 @@
 // src/services/telegram/handlers/command-handlers.ts
 import { Context } from 'telegraf';
-import { logger } from '../../../utils/logger';
+import { extendTelemetryContext, getTelemetryContext } from '../../../observability';
+import { getLogger } from '../../../utils/logger';
 import { BotActivityService } from '../bot-activity.service';
 import { BotStatusService } from '../bot-status.service';
 
@@ -15,7 +16,15 @@ export class CommandHandlers {
 
   async handleHelp(ctx: Context): Promise<void> {
     const userId = ctx.from?.id;
-    logger.info('User requested help', { userId });
+    const logger = getLogger(
+      extendTelemetryContext(getTelemetryContext(), {
+        component: 'telegram_command',
+        chatId: ctx.chat?.id,
+        userId: userId ? String(userId) : undefined,
+        messageType: 'command',
+      }),
+    );
+    logger.info('telegram.command.received', { command: 'help' });
     this.activityService.recordActivity('command_help');
 
     const helpMessage = `🆘 *JarvisMCP Help*
@@ -40,7 +49,15 @@ export class CommandHandlers {
 
   async handleStatus(ctx: Context): Promise<void> {
     const userId = ctx.from?.id;
-    logger.info('User requested status', { userId });
+    const logger = getLogger(
+      extendTelemetryContext(getTelemetryContext(), {
+        component: 'telegram_command',
+        chatId: ctx.chat?.id,
+        userId: userId ? String(userId) : undefined,
+        messageType: 'command',
+      }),
+    );
+    logger.info('telegram.command.received', { command: 'status' });
     this.activityService.recordActivity('command_status');
 
     const statusMessage = await this.statusService.getFormattedStatus();

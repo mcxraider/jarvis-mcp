@@ -3,8 +3,8 @@
  *
  * @module DirectToolCallDispatcher
  */
-
-import { logger } from '../../utils/logger';
+import { TelemetryContext, extendTelemetryContext, recordToolCall } from '../../observability';
+import { getLogger, serializeError } from '../../utils/logger';
 import { ToolCall, ToolResult, ToolDispatcher } from '../../types/tool.types';
 import { TodoistAPIService } from '../external/todoist-api.service';
 
@@ -22,7 +22,7 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
 
     this.todoistService = new TodoistAPIService(todoistApiKey);
 
-    logger.info('DirectToolCallDispatcher initialized', {
+    getLogger({ requestId: 'startup', component: 'tool_dispatcher' }).info('tool.dispatcher.initialized', {
       hasTodoistService: !!this.todoistService,
     });
   }
@@ -34,15 +34,24 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
    * @param userId - User ID for context/authorization
    * @returns Promise<ToolResult[]> - Results of all tool executions
    */
-  async executeToolCalls(toolCalls: ToolCall[], userId: string): Promise<ToolResult[]> {
-    logger.info('Executing tool calls directly', {
-      userId,
+  async executeToolCalls(
+    toolCalls: ToolCall[],
+    userId: string,
+    context?: TelemetryContext,
+  ): Promise<ToolResult[]> {
+    const logger = getLogger(
+      extendTelemetryContext(context, {
+        component: 'tool_dispatcher',
+        userId,
+      }),
+    );
+    logger.info('tool.dispatch.started', {
       toolCallsCount: toolCalls.length,
       functionNames: toolCalls.map((tc) => tc.function.name),
     });
 
     // Execute all tool calls in parallel for better performance
-    const promises = toolCalls.map((toolCall) => this.executeToolCall(toolCall, userId));
+    const promises = toolCalls.map((toolCall) => this.executeToolCall(toolCall, userId, context));
     const results = await Promise.allSettled(promises);
 
     // Convert Promise.allSettled results to our ToolResult format
@@ -72,13 +81,24 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
    * @returns Promise<any> - The result of the function execution
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async executeToolCall(toolCall: ToolCall, userId: string): Promise<any> {
+  private async executeToolCall(
+    toolCall: ToolCall,
+    userId: string,
+    context?: TelemetryContext,
+  ): Promise<any> {
+    const logger = getLogger(
+      extendTelemetryContext(context, {
+        component: 'tool_dispatcher',
+        userId,
+        stage: 'tool_call',
+      }),
+    );
+    const startTime = Date.now();
     try {
       const functionName = toolCall.function.name;
       const parameters = JSON.parse(toolCall.function.arguments);
 
-      logger.debug('Executing tool call', {
-        userId,
+      logger.info('tool.call.started', {
         functionName,
         toolCallId: toolCall.id,
         parameters: Object.keys(parameters),
@@ -86,21 +106,21 @@ export class DirectToolCallDispatcher implements ToolDispatcher {
 
       const result = await this.routeFunctionCall(functionName, parameters);
 
-      logger.debug('Tool call executed successfully', {
-        userId,
+      logger.info('tool.call.succeeded', {
         functionName,
         toolCallId: toolCall.id,
         hasResult: !!result,
       });
+      recordToolCall(functionName, 'success', Date.now() - startTime);
 
       return result;
     } catch (error) {
-      logger.error('Tool call execution error', {
-        userId,
+      logger.error('tool.call.failed', {
         functionName: toolCall.function.name,
         toolCallId: toolCall.id,
-        error: (error as Error).message,
+        ...serializeError(error),
       });
+      recordToolCall(toolCall.function.name, 'error', Date.now() - startTime);
       throw error;
     }
   }

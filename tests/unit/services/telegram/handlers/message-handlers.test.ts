@@ -40,6 +40,11 @@ describe('MessageHandlers', () => {
       'meeting.mp3',
       'audio/mpeg',
       123,
+      expect.objectContaining({
+        component: 'telegram_message',
+        messageType: 'audio_document',
+        userId: '123',
+      }),
     );
     expect(messageProcessor.processAudioMessage).not.toHaveBeenCalled();
     expect(activityService.recordActivity).toHaveBeenCalledWith('message_document');

@@ -38,4 +38,6 @@ const telegramConfig: TelegramConfig = {
 
 export const botService = new TelegramBotService(telegramConfig, messageProcessor);
 
-logger.info('Services initialised');
+logger.info('app.services_initialized', {
+  hasToolDispatcher: true,
+});
