@@ -4,6 +4,8 @@ describe('MessageHandlers', () => {
   function createContext(message: Record<string, unknown>) {
     return {
       from: { id: 123, username: 'tester' },
+      chat: { id: 456 },
+      update: { update_id: 789 },
       message,
       reply: jest.fn().mockResolvedValue(undefined),
     } as any;
@@ -16,6 +18,9 @@ describe('MessageHandlers', () => {
     } as any;
     const messageProcessor = {
       processAudioDocument: jest.fn().mockResolvedValue('processed document'),
+      processAudioDocumentDetailed: jest.fn().mockResolvedValue({
+        responseText: 'processed document',
+      }),
       processAudioMessage: jest.fn(),
     } as any;
     const activityService = {
@@ -35,11 +40,14 @@ describe('MessageHandlers', () => {
 
     expect(fileService.isAudioFile).toHaveBeenCalledWith('audio/mpeg');
     expect(fileService.getFileUrl).toHaveBeenCalledWith('file-1');
-    expect(messageProcessor.processAudioDocument).toHaveBeenCalledWith(
+    expect(messageProcessor.processAudioDocumentDetailed).toHaveBeenCalledWith(
       'https://example.com/file.mp3',
       'meeting.mp3',
       'audio/mpeg',
       123,
+      expect.objectContaining({
+        chatId: '456',
+      }),
     );
     expect(messageProcessor.processAudioMessage).not.toHaveBeenCalled();
     expect(activityService.recordActivity).toHaveBeenCalledWith('message_document');
@@ -53,6 +61,7 @@ describe('MessageHandlers', () => {
     } as any;
     const messageProcessor = {
       processAudioDocument: jest.fn(),
+      processAudioDocumentDetailed: jest.fn(),
     } as any;
     const activityService = {
       recordActivity: jest.fn(),
@@ -83,6 +92,7 @@ describe('MessageHandlers', () => {
     } as any;
     const messageProcessor = {
       processAudioDocument: jest.fn(),
+      processAudioDocumentDetailed: jest.fn(),
     } as any;
     const activityService = {
       recordActivity: jest.fn(),

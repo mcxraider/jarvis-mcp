@@ -22,6 +22,8 @@ import { GPTValidator } from './validators/gpt.validator';
 import { GPTErrorHandler } from './errors/gpt-error-handler.service';
 import { FunctionCallingProcessor } from './processors/function-calling.processor';
 import { SimpleTextProcessor } from './processors/simple-text.processor';
+import { UsageTrackingService } from '../persistence';
+import { ProcessingContext } from '../../types/processing.types';
 
 /**
  * Service for generating text content using OpenAI GPT models with function calling
@@ -33,6 +35,7 @@ export class GPTService {
   private readonly functionCallingProcessor: FunctionCallingProcessor;
   private readonly simpleTextProcessor: SimpleTextProcessor;
   private readonly toolDispatcher?: ToolDispatcher;
+  private readonly usageTrackingService?: UsageTrackingService;
 
   /**
    * Creates a new GPTService instance
@@ -41,7 +44,11 @@ export class GPTService {
    * @param config - Configuration options for the service
    * @throws {Error} If OpenAI API key is not provided
    */
-  constructor(toolDispatcher?: ToolDispatcher, config?: Partial<GPTConfig>) {
+  constructor(
+    toolDispatcher?: ToolDispatcher,
+    config?: Partial<GPTConfig>,
+    usageTrackingService?: UsageTrackingService,
+  ) {
     const apiKey = config?.apiKey || process.env.OPENAI_API_KEY;
 
     // Validate configuration
@@ -49,6 +56,7 @@ export class GPTService {
 
     this.openai = new OpenAI({ apiKey });
     this.toolDispatcher = toolDispatcher;
+    this.usageTrackingService = usageTrackingService;
     this.enableFunctionCalling = config?.enableFunctionCalling !== false && !!toolDispatcher;
 
     // Set default configuration with provided overrides
@@ -60,7 +68,10 @@ export class GPTService {
     };
 
     // Initialize processors
-    this.functionCallingProcessor = new FunctionCallingProcessor(toolDispatcher);
+    this.functionCallingProcessor = new FunctionCallingProcessor(
+      toolDispatcher,
+      usageTrackingService,
+    );
     this.simpleTextProcessor = new SimpleTextProcessor();
 
     logger.info('GPTService initialized', {
@@ -78,7 +89,16 @@ export class GPTService {
    * @param userId - User identifier for context/authorization
    * @returns Promise<string> - The final response to send back to user
    */
-  async processMessage(message: string, userId?: string): Promise<string> {
+  async processMessage(message: string, userId?: string, context?: ProcessingContext): Promise<string> {
+    const result = await this.processMessageDetailed(message, userId, context);
+    return result.response;
+  }
+
+  async processMessageDetailed(
+    message: string,
+    userId?: string,
+    context?: ProcessingContext,
+  ): Promise<MessageProcessingResult> {
     const startTime = Date.now();
 
     logger.info('Processing message with GPT', {
@@ -96,25 +116,57 @@ export class GPTService {
         GPTValidator.validateInputMessage(message, this.config.maxInputLength);
 
         // Process with function calling if enabled
+        await this.usageTrackingService?.recordEvent({
+          userId,
+          chatId: context?.chatId,
+          jobId: context?.jobId,
+          messageId: context?.sourceMessageId,
+          eventType: 'gpt_request',
+          model: this.config.model,
+          metadata: {
+            functionCallingEnabled: this.enableFunctionCalling,
+            messageLength: message.length,
+          },
+        });
+
+        let result: MessageProcessingResult;
+
         if (this.enableFunctionCalling) {
-          const result = await this.functionCallingProcessor.processWithFunctionCalling(
+          result = await this.functionCallingProcessor.processWithFunctionCalling(
             this.openai,
             this.config.model,
             this.config.temperature,
             message,
             userId || 'anonymous',
           );
-          return result.response;
+        } else {
+          result = await this.simpleTextProcessor.processSimpleMessage(
+            this.openai,
+            this.config.model,
+            this.config.temperature,
+            message,
+            userId,
+          );
         }
 
-        // Fallback to simple text generation
-        return await this.simpleTextProcessor.processSimpleMessage(
-          this.openai,
-          this.config.model,
-          this.config.temperature,
-          message,
+        await this.usageTrackingService?.recordEvent({
           userId,
-        );
+          chatId: context?.chatId,
+          jobId: context?.jobId,
+          messageId: context?.sourceMessageId,
+          eventType: 'gpt_response',
+          model: result.model,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          estimatedCostUsd: result.estimatedCostUsd,
+          durationMs: result.processingTimeMs,
+          metadata: {
+            functionCallsCount: result.functionCallsCount,
+            usedFunctionCalling: result.usedFunctionCalling,
+          },
+        });
+
+        return result;
       } catch (error) {
         lastError = error as Error;
 
@@ -143,7 +195,28 @@ export class GPTService {
       processingTimeMs,
     });
 
-    return GPTErrorHandler.handleProcessingError(lastError!);
+    await this.usageTrackingService?.recordEvent({
+      userId,
+      chatId: context?.chatId,
+      jobId: context?.jobId,
+      messageId: context?.sourceMessageId,
+      eventType: 'error',
+      model: this.config.model,
+      durationMs: processingTimeMs,
+      metadata: {
+        source: 'gpt',
+        error: lastError!.message,
+      },
+    });
+
+    return {
+      response: GPTErrorHandler.handleProcessingError(lastError!),
+      originalMessage: message,
+      processingTimeMs,
+      usedFunctionCalling: this.enableFunctionCalling,
+      functionCallsCount: 0,
+      model: this.config.model,
+    };
   }
 
   /**

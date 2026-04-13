@@ -6,6 +6,7 @@ import { CommandHandlers } from '../handlers/command-handlers';
 import { MessageHandlers } from '../handlers/message-handlers';
 import { BotActivityService } from '../bot-activity.service';
 import { BotStatusService } from '../bot-status.service';
+import { ConversationStoreService, JobStateService, UsageTrackingService } from '../../persistence';
 
 /**
  * Centralizes all Telegram bot handlers
@@ -19,9 +20,19 @@ export class TelegramHandlers {
     messageProcessor: MessageProcessorService,
     activityService: BotActivityService,
     statusService: BotStatusService,
+    conversationStore?: ConversationStoreService,
+    jobStateService?: JobStateService,
+    usageTrackingService?: UsageTrackingService,
   ) {
-    this.commandHandlers = new CommandHandlers(activityService, statusService);
-    this.messageHandlers = new MessageHandlers(fileService, messageProcessor, activityService);
+    this.commandHandlers = new CommandHandlers(activityService, statusService, conversationStore);
+    this.messageHandlers = new MessageHandlers(
+      fileService,
+      messageProcessor,
+      activityService,
+      conversationStore,
+      jobStateService,
+      usageTrackingService,
+    );
   }
 
   setupHandlers(bot: Telegraf<Context>): void {

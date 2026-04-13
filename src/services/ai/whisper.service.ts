@@ -16,6 +16,8 @@ import { logger } from '../../utils/logger';
 import { AudioMimeTypes } from '../../utils/constants';
 import { validateFileSize } from '../../utils/ai/fileValidation';
 import { AudioConverter } from '../../utils/ai/audioConverter';
+import { UsageTrackingService } from '../persistence';
+import { ProcessingContext } from '../../types/processing.types';
 
 /**
  * Constants for Whisper service configuration
@@ -71,6 +73,7 @@ export class WhisperService {
   private readonly openai: OpenAI;
   private readonly config: Required<Omit<WhisperConfig, 'language'>>;
   private readonly language: string;
+  private readonly usageTrackingService?: UsageTrackingService;
 
   /**
    * Creates a new WhisperService instance
@@ -78,7 +81,7 @@ export class WhisperService {
    * @param config - Configuration options for the service
    * @throws {Error} If OpenAI API key is not provided
    */
-  constructor(config?: Partial<WhisperConfig>) {
+  constructor(config?: Partial<WhisperConfig>, usageTrackingService?: UsageTrackingService) {
     const apiKey = config?.apiKey || process.env.OPENAI_API_KEY;
 
     if (!apiKey) {
@@ -88,6 +91,7 @@ export class WhisperService {
     }
 
     this.openai = new OpenAI({ apiKey });
+    this.usageTrackingService = usageTrackingService;
 
     // Set default configuration with provided overrides
     // Always enforce English-only transcription unless explicitly disabled
@@ -123,7 +127,11 @@ export class WhisperService {
    * @returns Promise resolving to transcription result
    * @throws {Error} If file download fails, file is too large, or transcription fails
    */
-  async transcribeAudio(fileUrl: string, userId?: number): Promise<TranscriptionResult> {
+  async transcribeAudio(
+    fileUrl: string,
+    userId?: number,
+    context?: ProcessingContext,
+  ): Promise<TranscriptionResult> {
     const startTime = Date.now();
 
     logger.info('Starting audio transcription', {
@@ -230,6 +238,20 @@ export class WhisperService {
 
       logger.info('Audio transcription completed successfully', logData);
 
+      await this.usageTrackingService?.recordEvent({
+        userId: userId?.toString(),
+        chatId: context?.chatId,
+        jobId: context?.jobId,
+        messageId: context?.sourceMessageId,
+        eventType: 'audio_transcription',
+        model: this.config.model,
+        durationMs: processingTimeMs,
+        metadata: {
+          fileSizeBytes: processedBuffer.length,
+          detectedLanguage: result.detectedLanguage ?? null,
+        },
+      });
+
       return result;
     } catch (error) {
       const processingTimeMs = Date.now() - startTime;
@@ -239,6 +261,20 @@ export class WhisperService {
         fileUrl: this.sanitizeUrlForLogging(fileUrl),
         error: (error as Error).message,
         processingTimeMs,
+      });
+
+      await this.usageTrackingService?.recordEvent({
+        userId: userId?.toString(),
+        chatId: context?.chatId,
+        jobId: context?.jobId,
+        messageId: context?.sourceMessageId,
+        eventType: 'error',
+        model: this.config.model,
+        durationMs: processingTimeMs,
+        metadata: {
+          source: 'whisper',
+          error: (error as Error).message,
+        },
       });
 
       throw new Error(`Transcription failed: ${(error as Error).message}`);
