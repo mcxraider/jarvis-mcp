@@ -34,6 +34,12 @@ export interface MessageProcessingResult {
   functionCallsCount: number;
   /** Model used for generation */
   model: string;
+  /** Usage metrics returned by OpenAI when available */
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
 }
 
 /**

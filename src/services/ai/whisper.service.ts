@@ -12,7 +12,13 @@
  */
 
 import OpenAI from 'openai';
-import { logger } from '../../utils/logger';
+import {
+  TelemetryContext,
+  extendTelemetryContext,
+  hashContent,
+  recordWhisperRequest,
+} from '../../observability';
+import { getLogger, serializeError } from '../../utils/logger';
 import { AudioMimeTypes } from '../../utils/constants';
 import { validateFileSize } from '../../utils/ai/fileValidation';
 import { AudioConverter } from '../../utils/ai/audioConverter';
@@ -106,7 +112,7 @@ export class WhisperService {
       ? WHISPER_CONSTANTS.DEFAULT_LANGUAGE
       : config?.language || WHISPER_CONSTANTS.DEFAULT_LANGUAGE;
 
-    logger.info('WhisperService initialized', {
+    getLogger({ requestId: 'startup', component: 'whisper_service' }).info('audio.service.initialized', {
       model: this.config.model,
       maxFileSizeMB: Math.round(this.config.maxFileSizeBytes / (1024 * 1024)),
       responseFormat: this.config.responseFormat,
@@ -123,17 +129,26 @@ export class WhisperService {
    * @returns Promise resolving to transcription result
    * @throws {Error} If file download fails, file is too large, or transcription fails
    */
-  async transcribeAudio(fileUrl: string, userId?: number): Promise<TranscriptionResult> {
+  async transcribeAudio(
+    fileUrl: string,
+    userId?: number,
+    context?: TelemetryContext,
+  ): Promise<TranscriptionResult> {
     const startTime = Date.now();
+    const scopedContext = extendTelemetryContext(context, {
+      component: 'whisper_service',
+      userId: userId ? String(userId) : undefined,
+      stage: 'transcription',
+    });
+    const logger = getLogger(scopedContext);
 
-    logger.info('Starting audio transcription', {
-      userId,
-      fileUrl: this.sanitizeUrlForLogging(fileUrl),
+    logger.info('audio.transcription.started', {
+      fileUrlHash: hashContent(fileUrl),
     });
 
     try {
       // Download the audio file
-      const audioBuffer = await this.downloadAudioFile(fileUrl);
+      const audioBuffer = await this.downloadAudioFile(fileUrl, scopedContext);
 
       // Validate file size
       validateFileSize(audioBuffer.length, this.config.maxFileSizeBytes);
@@ -147,8 +162,7 @@ export class WhisperService {
       let conversionTimeMs = 0;
 
       if (AudioConverter.needsConversion(originalExtension)) {
-        logger.info('Audio format needs conversion', {
-          userId,
+        logger.info('audio.conversion.started', {
           originalFormat: originalExtension,
           targetFormat: AudioConverter.getTargetFormat(),
         });
@@ -158,6 +172,7 @@ export class WhisperService {
             audioBuffer,
             originalExtension,
             userId,
+            scopedContext,
           );
 
           processedBuffer = conversionResult.convertedBuffer;
@@ -167,8 +182,7 @@ export class WhisperService {
           // Validate converted file size
           validateFileSize(processedBuffer.length, this.config.maxFileSizeBytes);
 
-          logger.info('Audio conversion completed', {
-            userId,
+          logger.info('audio.conversion.succeeded', {
             originalFormat: originalExtension,
             targetFormat: fileExtension,
             originalSize: audioBuffer.length,
@@ -176,10 +190,9 @@ export class WhisperService {
             conversionTimeMs,
           });
         } catch (conversionError) {
-          logger.error('Audio conversion failed', {
-            userId,
+          logger.error('audio.conversion.failed', {
             originalFormat: originalExtension,
-            error: (conversionError as Error).message,
+            ...serializeError(conversionError),
           });
 
           // Provide helpful error message for conversion failures
@@ -201,7 +214,7 @@ export class WhisperService {
       });
 
       // Perform transcription
-      const transcription = await this.performTranscription(audioFile);
+      const transcription = await this.performTranscription(audioFile, scopedContext);
 
       const processingTimeMs = Date.now() - startTime;
 
@@ -214,8 +227,7 @@ export class WhisperService {
 
       // Add conversion information to logs if conversion was performed
       const logData: any = {
-        userId,
-        text: result.text.substring(0, WHISPER_CONSTANTS.MAX_LOG_TEXT_LENGTH),
+        textHash: hashContent(result.text.substring(0, WHISPER_CONSTANTS.MAX_LOG_TEXT_LENGTH)),
         textLength: transcription.length,
         processingTimeMs,
         fileSizeBytes: processedBuffer.length,
@@ -228,18 +240,19 @@ export class WhisperService {
         logData.transcriptionTimeMs = processingTimeMs - conversionTimeMs;
       }
 
-      logger.info('Audio transcription completed successfully', logData);
+      logger.info('audio.transcription.succeeded', logData);
+      recordWhisperRequest('success', processingTimeMs);
 
       return result;
     } catch (error) {
       const processingTimeMs = Date.now() - startTime;
 
-      logger.error('Audio transcription failed', {
-        userId,
-        fileUrl: this.sanitizeUrlForLogging(fileUrl),
-        error: (error as Error).message,
+      logger.error('audio.transcription.failed', {
+        fileUrlHash: hashContent(fileUrl),
+        ...serializeError(error),
         processingTimeMs,
       });
+      recordWhisperRequest('error', processingTimeMs);
 
       throw new Error(`Transcription failed: ${(error as Error).message}`);
     }
@@ -252,8 +265,10 @@ export class WhisperService {
    * @returns Promise resolving to audio file buffer
    * @private
    */
-  private async downloadAudioFile(fileUrl: string): Promise<Buffer> {
+  private async downloadAudioFile(fileUrl: string, context?: TelemetryContext): Promise<Buffer> {
+    const logger = getLogger(extendTelemetryContext(context, { component: 'whisper_download' }));
     try {
+      logger.info('audio.download.started', { fileUrlHash: hashContent(fileUrl) });
       const response = await fetch(fileUrl);
 
       if (!response.ok) {
@@ -263,12 +278,16 @@ export class WhisperService {
       // Validate content type if available
       const contentType = response.headers.get('content-type');
       if (contentType && !this.isValidAudioMimeType(contentType)) {
-        logger.warn('Unexpected content type for audio file', { contentType });
+        logger.warn('audio.download.unexpected_content_type', { contentType });
       }
 
       const arrayBuffer = await response.arrayBuffer();
       return Buffer.from(arrayBuffer);
     } catch (error) {
+      logger.error('audio.download.failed', {
+        fileUrlHash: hashContent(fileUrl),
+        ...serializeError(error),
+      });
       throw new Error(`Failed to download audio file: ${(error as Error).message}`);
     }
   }
@@ -280,7 +299,8 @@ export class WhisperService {
    * @returns Promise resolving to transcribed text
    * @private
    */
-  private async performTranscription(audioFile: File): Promise<string> {
+  private async performTranscription(audioFile: File, context?: TelemetryContext): Promise<string> {
+    const logger = getLogger(extendTelemetryContext(context, { component: 'whisper_api' }));
     try {
       const transcription = await this.openai.audio.transcriptions.create({
         file: audioFile,
@@ -304,6 +324,7 @@ export class WhisperService {
 
       return transcribedText;
     } catch (error) {
+      logger.error('audio.transcription.failed', serializeError(error));
       if (error instanceof Error) {
         // Handle specific OpenAI API errors
         if (error.message.includes('Invalid file format')) {
@@ -326,6 +347,7 @@ export class WhisperService {
    * @private
    */
   private validateEnglishContent(text: string): void {
+    const logger = getLogger({ requestId: 'whisper-validation', component: 'whisper_service' });
     // Basic heuristic to detect potential non-English content
     const nonLatinChars = /[^\x00-\x7F\s\p{P}]/u.test(text);
     const commonNonEnglishPatterns =
@@ -335,7 +357,7 @@ export class WhisperService {
 
     if (nonLatinChars || commonNonEnglishPatterns) {
       logger.warn('Potential non-English content detected in transcription', {
-        textSample: text.substring(0, 50),
+        textSampleHash: hashContent(text.substring(0, 50)),
         hasNonLatinChars: nonLatinChars,
         hasNonEnglishPatterns: commonNonEnglishPatterns,
         enforceEnglishOnly: this.config.enforceEnglishOnly,

@@ -5,7 +5,8 @@ import { spawn } from 'child_process';
 import { writeFile, unlink } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { logger } from '../logger';
+import { TelemetryContext, extendTelemetryContext } from '../../observability';
+import { createComponentLogger, serializeError } from '../logger';
 
 /**
  * Supported input audio formats that can be converted
@@ -93,11 +94,18 @@ export class AudioConverter {
     audioBuffer: Buffer,
     originalExtension: string,
     userId?: number,
+    context?: TelemetryContext,
   ): Promise<ConversionResult> {
     const startTime = Date.now();
+    const logger = createComponentLogger(
+      'audio_converter',
+      extendTelemetryContext(context, {
+        userId: userId ? String(userId) : undefined,
+        stage: 'conversion',
+      }),
+    );
 
-    logger.info('Starting audio conversion', {
-      userId,
+    logger.info('audio.conversion.started', {
       originalFormat: originalExtension,
       targetFormat: TARGET_FORMAT,
       originalSizeBytes: audioBuffer.length,
@@ -126,8 +134,7 @@ export class AudioConverter {
         convertedSizeBytes: convertedBuffer.length,
       };
 
-      logger.info('Audio conversion completed successfully', {
-        userId,
+      logger.info('audio.conversion.succeeded', {
         originalFormat: originalExtension,
         targetFormat: TARGET_FORMAT,
         conversionTimeMs,
@@ -140,12 +147,11 @@ export class AudioConverter {
     } catch (error) {
       const conversionTimeMs = Date.now() - startTime;
 
-      logger.error('Audio conversion failed', {
-        userId,
+      logger.error('audio.conversion.failed', {
         originalFormat: originalExtension,
         targetFormat: TARGET_FORMAT,
-        error: (error as Error).message,
         conversionTimeMs,
+        ...serializeError(error),
       });
 
       // Provide a more helpful error if the installer package is missing.
@@ -275,14 +281,15 @@ export class AudioConverter {
    * @private
    */
   private static async cleanupTempFiles(filePaths: string[]): Promise<void> {
+    const logger = createComponentLogger('audio_converter');
     const cleanupPromises = filePaths.map(async (filePath) => {
       try {
         await unlink(filePath);
       } catch (error) {
         // Ignore cleanup errors, just log them
-        logger.warn('Failed to cleanup temporary file', {
+        logger.warn('audio.conversion.cleanup_failed', {
           filePath,
-          error: (error as Error).message,
+          ...serializeError(error),
         });
       }
     });

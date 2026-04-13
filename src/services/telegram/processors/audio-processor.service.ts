@@ -1,5 +1,10 @@
 // src/services/telegram/processors/audio-processor.service.ts
-import { logger } from '../../../utils/logger';
+import {
+  TelemetryContext,
+  extendTelemetryContext,
+  recordMessageProcessingFailure,
+} from '../../../observability';
+import { getLogger, serializeError } from '../../../utils/logger';
 import { WhisperService } from '../../ai/whisper.service';
 import { GPTService } from '../../ai/gpt.service';
 
@@ -24,15 +29,30 @@ export class AudioProcessorService {
   /**
    * Processes audio messages (voice notes, audio files)
    */
-  async processAudioMessage(fileUrl: string, userId?: number): Promise<string> {
-    logger.info('Processing audio message', {
-      userId,
-      fileUrl: fileUrl.substring(0, 50) + '...', // Log partial URL for privacy
+  async processAudioMessage(
+    fileUrl: string,
+    userId?: number,
+    context?: TelemetryContext,
+  ): Promise<string> {
+    const scopedContext = extendTelemetryContext(context, {
+      component: 'audio_processor',
+      userId: userId ? String(userId) : undefined,
+      messageType: 'audio',
+      stage: 'process',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', {
+      hasFileUrl: !!fileUrl,
     });
 
     try {
       // Transcribe the audio using Whisper service
-      const transcriptionResult = await this.whisperService.transcribeAudio(fileUrl, userId);
+      const transcriptionResult = await this.whisperService.transcribeAudio(
+        fileUrl,
+        userId,
+        scopedContext,
+      );
 
       const { text, processingTimeMs } = transcriptionResult;
 
@@ -46,7 +66,7 @@ export class AudioProcessorService {
 
       // Process the transcribed text with GPT
       try {
-        const response = await this.gptService.processMessage(text, userId?.toString());
+        const response = await this.gptService.processMessage(text, userId?.toString(), scopedContext);
 
         const finalResponse =
           `📝 What you said: ${text}\n\n` +
@@ -55,11 +75,7 @@ export class AudioProcessorService {
 
         return finalResponse;
       } catch (gptError) {
-        logger.warn('Failed to process transcribed audio with GPT', {
-          userId,
-          transcribedText: text.substring(0, 100),
-          error: (gptError as Error).message,
-        });
+        logger.warn('openai.chat.failed', serializeError(gptError));
 
         // Fallback to just showing transcription if GPT processing fails
         return (
@@ -70,10 +86,8 @@ export class AudioProcessorService {
         );
       }
     } catch (error) {
-      logger.error('Failed to process audio message', {
-        userId,
-        error: (error as Error).message,
-      });
+      recordMessageProcessingFailure('audio', 'audio_processor');
+      logger.error('message.route.failed', serializeError(error));
 
       return this.handleAudioProcessingError(error as Error);
     }
@@ -87,16 +101,28 @@ export class AudioProcessorService {
     fileName: string,
     mimeType: string,
     userId?: number,
+    context?: TelemetryContext,
   ): Promise<string> {
-    logger.info('Processing audio document', {
-      userId,
+    const scopedContext = extendTelemetryContext(context, {
+      component: 'audio_processor',
+      userId: userId ? String(userId) : undefined,
+      messageType: 'audio_document',
+      stage: 'process',
+    });
+    const logger = getLogger(scopedContext);
+
+    logger.info('message.route.started', {
       fileName,
       mimeType,
     });
 
     try {
       // Use the same transcription logic as audio messages
-      const transcriptionResult = await this.whisperService.transcribeAudio(fileUrl, userId);
+      const transcriptionResult = await this.whisperService.transcribeAudio(
+        fileUrl,
+        userId,
+        scopedContext,
+      );
 
       const { text, processingTimeMs, fileSizeBytes } = transcriptionResult;
 
@@ -111,7 +137,7 @@ export class AudioProcessorService {
 
       // Process the transcribed text with GPT
       try {
-        const response = await this.gptService.processMessage(text, userId?.toString());
+        const response = await this.gptService.processMessage(text, userId?.toString(), scopedContext);
 
         const finalResponse =
           `📁 Audio document "${fileName}" processed successfully!\n` +
@@ -122,11 +148,9 @@ export class AudioProcessorService {
 
         return finalResponse;
       } catch (gptError) {
-        logger.warn('Failed to process transcribed audio document with GPT', {
-          userId,
+        logger.warn('openai.chat.failed', {
           fileName,
-          transcribedText: text.substring(0, 100),
-          error: (gptError as Error).message,
+          ...serializeError(gptError),
         });
 
         // Fallback to just showing transcription if GPT processing fails
@@ -139,11 +163,11 @@ export class AudioProcessorService {
         );
       }
     } catch (error) {
-      logger.error('Failed to process audio document', {
-        userId,
+      recordMessageProcessingFailure('audio_document', 'audio_processor');
+      logger.error('message.route.failed', {
         fileName,
         mimeType,
-        error: (error as Error).message,
+        ...serializeError(error),
       });
 
       return this.handleAudioDocumentError(error as Error, fileName, mimeType);

@@ -162,6 +162,9 @@ Telegram → Webhook → ngrok → Your Server → Bot Service → Response → 
 # Check if your server is accessible
 curl http://localhost:3000/ping
 
+# Check Prometheus-style metrics
+curl http://localhost:3000/metrics
+
 # Check ngrok status
 curl https://your-ngrok-url.ngrok-free.app/ping
 
@@ -179,5 +182,9 @@ tail -f logs/app.log  # if you add file logging
 | `TEST_CHAT_ID` | Your Telegram user ID for testing | `987654321` |
 | `PORT` | Local server port | `3000` |
 | `NODE_ENV` | Environment mode | `development` |
+
+## Observability
+
+The app now emits structured JSON logs and exposes `/metrics` for local monitoring. See [docs/observability.md](/Users/Spare/Desktop/jarvis-mcp/docs/observability.md) for the full metric list, redaction rules, and suggested dashboard panels.
 
 Your bot is well-structured and ready to go! Just fix the environment variables and you should be able to start testing.
