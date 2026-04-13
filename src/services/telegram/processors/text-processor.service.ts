@@ -1,24 +1,16 @@
-// src/services/telegram/processors/text-processor.service.ts
 import { logger } from '../../../utils/logger';
 import { GPTService } from '../../ai';
 import { ToolDispatcher } from '../../../types/tool.types';
 import { ProcessorResponse, ProcessingContext } from '../../../types/processing.types';
 import { UsageTrackingService } from '../../persistence';
 
-/**
- * Service responsible for processing text messages
- */
 export class TextProcessorService {
   private readonly gptService: GPTService;
 
   constructor(toolDispatcher?: ToolDispatcher, usageTrackingService?: UsageTrackingService) {
-    // Initialize GPTService with tool dispatcher for function calling
     this.gptService = new GPTService(toolDispatcher, undefined, usageTrackingService);
   }
 
-  /**
-   * Processes text messages from users
-   */
   async processTextMessage(text: string, userId?: number, context?: ProcessingContext): Promise<string> {
     const result = await this.processTextMessageDetailed(text, userId, context);
     return result.responseText;
@@ -30,15 +22,17 @@ export class TextProcessorService {
     context?: ProcessingContext,
   ): Promise<ProcessorResponse> {
     logger.info('Processing text message', {
+      jobId: context?.jobId,
       userId,
       messageLength: text.length,
     });
 
     try {
-      // Process the message using GPT
+      await context?.onStage?.('gpt.processing');
       const response = await this.gptService.processMessageDetailed(text, userId?.toString(), context);
 
       logger.info('Text message processed successfully', {
+        jobId: context?.jobId,
         userId,
         messageLength: text.length,
         responseLength: response.response.length,
@@ -50,6 +44,7 @@ export class TextProcessorService {
       };
     } catch (error) {
       logger.error('Failed to process text message', {
+        jobId: context?.jobId,
         userId,
         messageLength: text.length,
         error: (error as Error).message,
@@ -61,9 +56,6 @@ export class TextProcessorService {
     }
   }
 
-  /**
-   * Handles errors during text processing and returns user-friendly messages
-   */
   private handleTextProcessingError(error: Error, text: string): string {
     const errorMessage = error.message;
 
@@ -82,7 +74,6 @@ export class TextProcessorService {
       return `I'm a bit busy right now!\n` + `🔄 Please try again in a moment.`;
     }
 
-    // Fallback response for other errors
     return (
       `I encountered an issue processing your request.\n` +
       `💭 Your message: "${text.length > 100 ? text.substring(0, 100) + '...' : text}"\n\n` +

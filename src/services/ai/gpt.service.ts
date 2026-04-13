@@ -1,21 +1,6 @@
-// src/services/ai/gpt.service.ts
-
-/**
- * Service for generating text content using OpenAI GPT models with function calling capabilities.
- * Handles intelligent function calling, text processing, and response formatting.
- *
- * @example
- * ```typescript
- * const gptService = new GPTService(toolDispatcher);
- * const response = await gptService.processMessage('Create a task to buy groceries', 'user123');
- * ```
- */
-
 import OpenAI from 'openai';
 import { logger } from '../../utils/logger';
 import { ToolDispatcher } from '../../types/tool.types';
-
-// Import modularized components
 import { GPT_CONSTANTS } from './constants/gpt.constants';
 import { GPTConfig, InternalGPTConfig, MessageProcessingResult } from '../../types/gpt.types';
 import { GPTValidator } from './validators/gpt.validator';
@@ -25,41 +10,27 @@ import { SimpleTextProcessor } from './processors/simple-text.processor';
 import { UsageTrackingService } from '../persistence';
 import { ProcessingContext } from '../../types/processing.types';
 
-/**
- * Service for generating text content using OpenAI GPT models with function calling
- */
+export interface GPTProcessingContext extends ProcessingContext {}
+
 export class GPTService {
   private readonly openai: OpenAI;
   private readonly config: InternalGPTConfig;
   private readonly enableFunctionCalling: boolean;
   private readonly functionCallingProcessor: FunctionCallingProcessor;
   private readonly simpleTextProcessor: SimpleTextProcessor;
-  private readonly toolDispatcher?: ToolDispatcher;
   private readonly usageTrackingService?: UsageTrackingService;
 
-  /**
-   * Creates a new GPTService instance
-   *
-   * @param toolDispatcher - Optional tool dispatcher for function calling
-   * @param config - Configuration options for the service
-   * @throws {Error} If OpenAI API key is not provided
-   */
   constructor(
     toolDispatcher?: ToolDispatcher,
     config?: Partial<GPTConfig>,
     usageTrackingService?: UsageTrackingService,
   ) {
     const apiKey = config?.apiKey || process.env.OPENAI_API_KEY;
-
-    // Validate configuration
     GPTValidator.validateConfig(apiKey!);
 
     this.openai = new OpenAI({ apiKey });
-    this.toolDispatcher = toolDispatcher;
     this.usageTrackingService = usageTrackingService;
     this.enableFunctionCalling = config?.enableFunctionCalling !== false && !!toolDispatcher;
-
-    // Set default configuration with provided overrides
     this.config = {
       apiKey: apiKey!,
       model: config?.model || GPT_CONSTANTS.DEFAULT_MODEL,
@@ -67,7 +38,6 @@ export class GPTService {
       temperature: config?.temperature || GPT_CONSTANTS.TEMPERATURE,
     };
 
-    // Initialize processors
     this.functionCallingProcessor = new FunctionCallingProcessor(
       toolDispatcher,
       usageTrackingService,
@@ -83,13 +53,7 @@ export class GPTService {
     });
   }
 
-  /**
-   * Main method to process user messages with intelligent function calling
-   * @param message - The user's natural language message
-   * @param userId - User identifier for context/authorization
-   * @returns Promise<string> - The final response to send back to user
-   */
-  async processMessage(message: string, userId?: string, context?: ProcessingContext): Promise<string> {
+  async processMessage(message: string, userId?: string, context?: GPTProcessingContext): Promise<string> {
     const result = await this.processMessageDetailed(message, userId, context);
     return result.response;
   }
@@ -97,11 +61,12 @@ export class GPTService {
   async processMessageDetailed(
     message: string,
     userId?: string,
-    context?: ProcessingContext,
+    context?: GPTProcessingContext,
   ): Promise<MessageProcessingResult> {
     const startTime = Date.now();
 
     logger.info('Processing message with GPT', {
+      jobId: context?.jobId,
       userId,
       messageLength: message.length,
       functionCallingEnabled: this.enableFunctionCalling,
@@ -112,10 +77,8 @@ export class GPTService {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // Validate input message
         GPTValidator.validateInputMessage(message, this.config.maxInputLength);
 
-        // Process with function calling if enabled
         await this.usageTrackingService?.recordEvent({
           userId,
           chatId: context?.chatId,
@@ -138,6 +101,7 @@ export class GPTService {
             this.config.temperature,
             message,
             userId || 'anonymous',
+            context,
           );
         } else {
           result = await this.simpleTextProcessor.processSimpleMessage(
@@ -173,6 +137,7 @@ export class GPTService {
         if (attempt < MAX_RETRIES && GPTErrorHandler.isRetryableError(lastError)) {
           const delay = GPTErrorHandler.getRetryDelay(attempt);
           logger.warn('Retryable error encountered, retrying', {
+            jobId: context?.jobId,
             userId,
             attempt,
             delayMs: delay,
@@ -189,6 +154,7 @@ export class GPTService {
     const processingTimeMs = Date.now() - startTime;
 
     logger.error('Message processing failed', {
+      jobId: context?.jobId,
       userId,
       messageLength: message.length,
       error: lastError!.message,
@@ -219,11 +185,6 @@ export class GPTService {
     };
   }
 
-  /**
-   * Gets current service configuration
-   *
-   * @returns Service configuration (excluding sensitive data)
-   */
   getConfig(): Omit<GPTConfig, 'apiKey'> {
     return {
       model: this.config.model,

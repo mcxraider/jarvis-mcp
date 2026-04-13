@@ -1,32 +1,31 @@
-// src/services/telegram/processors/audio-processor.service.ts
 import { logger } from '../../../utils/logger';
 import { WhisperService } from '../../ai/whisper.service';
 import { GPTService } from '../../ai/gpt.service';
 import { ProcessorResponse, ProcessingContext } from '../../../types/processing.types';
 import { UsageTrackingService } from '../../persistence';
+import { ToolDispatcher } from '../../../types/tool.types';
 
-/**
- * Service responsible for processing audio messages and documents
- */
 export class AudioProcessorService {
   private readonly whisperService: WhisperService;
   private readonly gptService: GPTService;
 
-  constructor(usageTrackingService?: UsageTrackingService) {
-    // Initialize WhisperService with English-only enforcement
-    this.whisperService = new WhisperService({
-      enforceEnglishOnly: true,
-      language: 'en',
-    }, usageTrackingService);
+  constructor(toolDispatcher?: ToolDispatcher, usageTrackingService?: UsageTrackingService) {
+    this.whisperService = new WhisperService(
+      {
+        enforceEnglishOnly: true,
+        language: 'en',
+      },
+      usageTrackingService,
+    );
 
-    // Initialize GPTService for text processing
-    this.gptService = new GPTService(undefined, undefined, usageTrackingService);
+    this.gptService = new GPTService(toolDispatcher, undefined, usageTrackingService);
   }
 
-  /**
-   * Processes audio messages (voice notes, audio files)
-   */
-  async processAudioMessage(fileUrl: string, userId?: number, context?: ProcessingContext): Promise<string> {
+  async processAudioMessage(
+    fileUrl: string,
+    userId?: number,
+    context?: ProcessingContext,
+  ): Promise<string> {
     const result = await this.processAudioMessageDetailed(fileUrl, userId, context);
     return result.responseText;
   }
@@ -37,17 +36,16 @@ export class AudioProcessorService {
     context?: ProcessingContext,
   ): Promise<ProcessorResponse> {
     logger.info('Processing audio message', {
+      jobId: context?.jobId,
       userId,
-      fileUrl: fileUrl.substring(0, 50) + '...', // Log partial URL for privacy
+      fileUrl: fileUrl.substring(0, 50) + '...',
     });
 
     try {
-      // Transcribe the audio using Whisper service
+      await context?.onStage?.('audio.transcribing');
       const transcriptionResult = await this.whisperService.transcribeAudio(fileUrl, userId, context);
-
       const { text, processingTimeMs } = transcriptionResult;
 
-      // If transcription is empty or too short, provide helpful feedback
       if (!text || text.trim().length < 2) {
         return {
           responseText:
@@ -57,28 +55,26 @@ export class AudioProcessorService {
         };
       }
 
-      // Process the transcribed text with GPT
       try {
+        await context?.onStage?.('gpt.processing');
         const response = await this.gptService.processMessageDetailed(text, userId?.toString(), context);
 
-        const finalResponse =
-          `📝 What you said: ${text}\n\n` +
-          `🤖 Response: ${response.response}\n\n` +
-          `⏱️ Transcription: ${Math.round(processingTimeMs / 1000)}s`;
-
         return {
-          responseText: finalResponse,
+          responseText:
+            `📝 What you said: ${text}\n\n` +
+            `🤖 Response: ${response.response}\n\n` +
+            `⏱️ Transcription: ${Math.round(processingTimeMs / 1000)}s`,
           processingTimeMs,
           transcriptionText: text,
         };
       } catch (gptError) {
         logger.warn('Failed to process transcribed audio with GPT', {
+          jobId: context?.jobId,
           userId,
           transcribedText: text.substring(0, 100),
           error: (gptError as Error).message,
         });
 
-        // Fallback to just showing transcription if GPT processing fails
         return {
           responseText:
             `🎵 Audio transcribed successfully!\n\n` +
@@ -91,6 +87,7 @@ export class AudioProcessorService {
       }
     } catch (error) {
       logger.error('Failed to process audio message', {
+        jobId: context?.jobId,
         userId,
         error: (error as Error).message,
       });
@@ -101,9 +98,6 @@ export class AudioProcessorService {
     }
   }
 
-  /**
-   * Processes documents that contain audio
-   */
   async processAudioDocument(
     fileUrl: string,
     fileName: string,
@@ -111,7 +105,13 @@ export class AudioProcessorService {
     userId?: number,
     context?: ProcessingContext,
   ): Promise<string> {
-    const result = await this.processAudioDocumentDetailed(fileUrl, fileName, mimeType, userId, context);
+    const result = await this.processAudioDocumentDetailed(
+      fileUrl,
+      fileName,
+      mimeType,
+      userId,
+      context,
+    );
     return result.responseText;
   }
 
@@ -123,18 +123,17 @@ export class AudioProcessorService {
     context?: ProcessingContext,
   ): Promise<ProcessorResponse> {
     logger.info('Processing audio document', {
+      jobId: context?.jobId,
       userId,
       fileName,
       mimeType,
     });
 
     try {
-      // Use the same transcription logic as audio messages
+      await context?.onStage?.('audio.transcribing');
       const transcriptionResult = await this.whisperService.transcribeAudio(fileUrl, userId, context);
+      const { text, processingTimeMs } = transcriptionResult;
 
-      const { text, processingTimeMs, fileSizeBytes } = transcriptionResult;
-
-      // If transcription is empty or too short, provide helpful feedback
       if (!text || text.trim().length < 2) {
         return {
           responseText:
@@ -145,31 +144,29 @@ export class AudioProcessorService {
         };
       }
 
-      // Process the transcribed text with GPT
       try {
+        await context?.onStage?.('gpt.processing');
         const response = await this.gptService.processMessageDetailed(text, userId?.toString(), context);
 
-        const finalResponse =
-          `📁 Audio document "${fileName}" processed successfully!\n` +
-          `🎼 Type: ${mimeType}\n\n` +
-          `📝 What was said: ${text}\n\n` +
-          `🤖 Response: ${response.response}\n\n` +
-          `⏱️ Transcription: ${Math.round(processingTimeMs / 1000)}s`;
-
         return {
-          responseText: finalResponse,
+          responseText:
+            `📁 Audio document "${fileName}" processed successfully!\n` +
+            `🎼 Type: ${mimeType}\n\n` +
+            `📝 What was said: ${text}\n\n` +
+            `🤖 Response: ${response.response}\n\n` +
+            `⏱️ Transcription: ${Math.round(processingTimeMs / 1000)}s`,
           processingTimeMs,
           transcriptionText: text,
         };
       } catch (gptError) {
         logger.warn('Failed to process transcribed audio document with GPT', {
+          jobId: context?.jobId,
           userId,
           fileName,
           transcribedText: text.substring(0, 100),
           error: (gptError as Error).message,
         });
 
-        // Fallback to just showing transcription if GPT processing fails
         return {
           responseText:
             `📁 Audio document "${fileName}" transcribed successfully!\n` +
@@ -183,6 +180,7 @@ export class AudioProcessorService {
       }
     } catch (error) {
       logger.error('Failed to process audio document', {
+        jobId: context?.jobId,
         userId,
         fileName,
         mimeType,
@@ -195,9 +193,6 @@ export class AudioProcessorService {
     }
   }
 
-  /**
-   * Handles errors during audio message processing
-   */
   private handleAudioProcessingError(error: Error): string {
     const errorMessage = error.message;
 
@@ -236,7 +231,6 @@ export class AudioProcessorService {
       );
     }
 
-    // Generic error message for other failures
     return (
       `🎵 Audio received, but processing failed.\n` +
       `❌ Error: Unable to transcribe the audio file.\n` +
@@ -244,9 +238,6 @@ export class AudioProcessorService {
     );
   }
 
-  /**
-   * Handles errors during audio document processing
-   */
   private handleAudioDocumentError(error: Error, fileName: string, mimeType: string): string {
     const errorMessage = error.message;
 
@@ -282,7 +273,6 @@ export class AudioProcessorService {
       );
     }
 
-    // Generic error message for other failures
     return (
       `📁 Audio document "${fileName}" received, but processing failed.\n` +
       `🎼 Type: ${mimeType}\n` +

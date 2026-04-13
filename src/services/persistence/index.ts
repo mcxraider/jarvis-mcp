@@ -6,6 +6,7 @@ export { ClarificationStateService } from './clarification-state.service';
 export { UsageTrackingService } from './usage-tracking.service';
 export { MessageRepository } from './repositories/message.repository';
 export { JobRepository } from './repositories/job.repository';
+export { JobEventRepository } from './repositories/job-event.repository';
 export { PendingClarificationRepository } from './repositories/pending-clarification.repository';
 export { UserPreferencesRepository } from './repositories/user-preferences.repository';
 export { UsageEventRepository } from './repositories/usage-event.repository';

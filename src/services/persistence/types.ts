@@ -67,14 +67,32 @@ export interface PersistedJob {
   sourceMessageId: string | null;
   jobType: JobType;
   status: JobStatus;
+  priority: number;
+  concurrencyKey: string | null;
+  dedupeKey: string | null;
   payload: Record<string, unknown>;
   result: Record<string, unknown> | null;
   errorMessage: string | null;
   attemptCount: number;
+  maxAttempts: number;
+  lockedAt: string | null;
+  workerId: string | null;
   startedAt: string | null;
   completedAt: string | null;
+  supersededByJobId: string | null;
+  ackMessageId: string | null;
+  progressMessageId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface JobEventRecord {
+  id: string;
+  jobId: string;
+  eventType: string;
+  message: string | null;
+  payload: Record<string, unknown> | null;
+  createdAt: string;
 }
 
 export interface PendingClarificationRecord {
@@ -151,6 +169,10 @@ export interface CreateJobInput {
   sourceMessageId?: string;
   jobType: JobType;
   payload: Record<string, unknown>;
+  priority?: number;
+  concurrencyKey?: string | null;
+  dedupeKey?: string | null;
+  maxAttempts?: number;
 }
 
 export interface CreatePendingClarificationInput {

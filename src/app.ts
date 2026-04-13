@@ -1,4 +1,3 @@
-// src/app.ts — service wiring
 import 'dotenv/config';
 import { logger } from './utils/logger';
 import { TelegramBotService } from './services/telegram/telegram-bot.service';
@@ -9,6 +8,7 @@ import {
   ClarificationStateService,
   ConversationStoreService,
   DatabaseService,
+  JobEventRepository,
   JobRepository,
   JobStateService,
   MessageRepository,
@@ -18,8 +18,18 @@ import {
   UsageTrackingService,
   UserPreferencesRepository,
 } from './services/persistence';
+import { JobService } from './services/jobs/job.service';
+import { TelegramUpdateIntakeService } from './services/telegram/telegram-update-intake.service';
+import { TelegramResponseService } from './services/telegram/telegram-response.service';
+import { TelegramProgressService } from './services/telegram/telegram-progress.service';
+import { JobProgressService } from './services/jobs/job-progress.service';
+import { JobSchedulerService } from './services/jobs/job-scheduler.service';
+import { JobQueueService } from './services/jobs/job-queue.service';
+import { JobWorkerService } from './services/jobs/job-worker.service';
+import { TextJobProcessor } from './services/jobs/processors/text-job.processor';
+import { AudioJobProcessor } from './services/jobs/processors/audio-job.processor';
+import { FileService } from './services/telegram/file.service';
 
-// Validate required environment variables before constructing any service
 const REQUIRED_ENV_VARS = [
   'BOT_TOKEN',
   'NGROK_URL',
@@ -27,13 +37,6 @@ const REQUIRED_ENV_VARS = [
   'OPENAI_API_KEY',
   'TODOIST_API_KEY',
 ];
-
-for (const key of REQUIRED_ENV_VARS) {
-  if (!process.env[key]) {
-    console.error(`[startup] Missing required environment variable: ${key}`);
-    process.exit(1);
-  }
-}
 
 const BOT_TOKEN = process.env.BOT_TOKEN!;
 const NGROK_URL = process.env.NGROK_URL!;
@@ -43,6 +46,7 @@ const DATABASE_VERBOSE_LOGGING = process.env.DATABASE_VERBOSE_LOGGING === 'true'
 
 export interface AppServices {
   botService: TelegramBotService;
+  workerService: JobWorkerService;
   databaseService: DatabaseService;
   conversationStore: ConversationStoreService;
   jobStateService: JobStateService;
@@ -52,6 +56,13 @@ export interface AppServices {
 }
 
 export async function initializeApplication(): Promise<AppServices> {
+  for (const key of REQUIRED_ENV_VARS) {
+    if (!process.env[key]) {
+      console.error(`[startup] Missing required environment variable: ${key}`);
+      process.exit(1);
+    }
+  }
+
   const databaseService = new DatabaseService({
     path: DATABASE_PATH,
     verboseLogging: DATABASE_VERBOSE_LOGGING,
@@ -63,6 +74,7 @@ export async function initializeApplication(): Promise<AppServices> {
 
   const messageRepository = new MessageRepository(databaseService);
   const jobRepository = new JobRepository(databaseService);
+  const jobEventRepository = new JobEventRepository(databaseService);
   const clarificationRepository = new PendingClarificationRepository(databaseService);
   const userPreferencesRepository = new UserPreferencesRepository(databaseService);
   const usageEventRepository = new UsageEventRepository(databaseService);
@@ -72,6 +84,8 @@ export async function initializeApplication(): Promise<AppServices> {
   const clarificationStateService = new ClarificationStateService(clarificationRepository);
   const usageTrackingService = new UsageTrackingService(usageEventRepository);
 
+  const jobService = new JobService(conversationStore, jobStateService);
+  const intakeService = new TelegramUpdateIntakeService(jobService);
   const toolDispatcher = new DirectToolCallDispatcher();
   const messageProcessor = new MessageProcessorService(toolDispatcher, usageTrackingService);
 
@@ -81,11 +95,33 @@ export async function initializeApplication(): Promise<AppServices> {
     secretToken: TELEGRAM_SECRET_TOKEN,
   };
 
-  const botService = new TelegramBotService(telegramConfig, messageProcessor, {
+  const botService = new TelegramBotService(telegramConfig, intakeService, jobService, {
     conversationStore,
-    jobStateService,
     usageTrackingService,
   });
+  const fileService = new FileService(BOT_TOKEN, botService.bot.telegram);
+  const responseService = new TelegramResponseService(botService.bot.telegram);
+  const progressService = new TelegramProgressService(responseService, jobStateService);
+  const jobProgressService = new JobProgressService(
+    jobEventRepository,
+    jobStateService,
+    progressService,
+  );
+  const jobSchedulerService = new JobSchedulerService(jobStateService);
+  const jobQueueService = new JobQueueService(jobStateService, jobSchedulerService);
+  const workerService = new JobWorkerService(
+    jobQueueService,
+    jobProgressService,
+    jobService,
+    responseService,
+  );
+
+  workerService.registerProcessor('text', new TextJobProcessor(messageProcessor));
+  workerService.registerProcessor('voice', new AudioJobProcessor(messageProcessor, fileService));
+  workerService.registerProcessor(
+    'audio_document',
+    new AudioJobProcessor(messageProcessor, fileService),
+  );
 
   logger.info('Services initialised', {
     databasePath: DATABASE_PATH,
@@ -93,6 +129,7 @@ export async function initializeApplication(): Promise<AppServices> {
 
   return {
     botService,
+    workerService,
     databaseService,
     conversationStore,
     jobStateService,

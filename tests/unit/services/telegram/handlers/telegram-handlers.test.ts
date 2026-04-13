@@ -14,11 +14,15 @@ describe('TelegramHandlers', () => {
     const statusService = {
       getFormattedStatus: jest.fn(),
     } as any;
+    const responseService = {} as any;
+    const jobService = {} as any;
     const handlers = new TelegramHandlers(
       fileService,
       messageProcessor,
       activityService,
       statusService,
+      responseService,
+      jobService,
     );
 
     handlers.setupHandlers(bot);

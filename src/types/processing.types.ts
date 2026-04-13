@@ -2,6 +2,7 @@ export interface ProcessingContext {
   jobId?: string;
   sourceMessageId?: string;
   chatId?: string;
+  onStage?: (eventType: string, message?: string) => Promise<void> | void;
 }
 
 export interface ProcessorResponse {

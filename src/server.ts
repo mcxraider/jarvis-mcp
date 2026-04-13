@@ -1,4 +1,3 @@
-// src/server.ts — Express setup, webhook registration, graceful shutdown
 import express, { Request, Response, NextFunction } from 'express';
 import { logger } from './utils/logger';
 import { createWebhookRouter } from './controllers/webhook.controller';
@@ -33,16 +32,26 @@ async function startServer(): Promise<void> {
     ),
   );
 
+  services.workerService.start();
+
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => {
     logger.info(`Server started at http://localhost:${PORT}`);
     logger.info(`Waiting for Telegram updates on /webhook/:secret`);
   });
 
-  process.on('SIGTERM', async () => {
+  const shutdown = async () => {
     logger.info('Shutting down gracefully...');
+    await services.workerService.stop();
     await services.databaseService.close();
     process.exit(0);
+  };
+
+  process.on('SIGTERM', () => {
+    void shutdown();
+  });
+  process.on('SIGINT', () => {
+    void shutdown();
   });
 }
 

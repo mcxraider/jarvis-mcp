@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ConversationStoreService,
   DatabaseService,
+  JobEventRepository,
   JobRepository,
   JobStateService,
   MessageRepository,
@@ -14,6 +15,8 @@ import {
   UserPreferencesRepository,
 } from '../../../../src/services/persistence';
 import { MessageHandlers } from '../../../../src/services/telegram/handlers/message-handlers';
+import { JobService } from '../../../../src/services/jobs/job.service';
+import { TelegramUpdateIntakeService } from '../../../../src/services/telegram/telegram-update-intake.service';
 
 describe('Persistence layer', () => {
   async function createPersistence() {
@@ -33,6 +36,7 @@ describe('Persistence layer', () => {
     const clarificationRepository = new PendingClarificationRepository(database);
     const preferencesRepository = new UserPreferencesRepository(database);
     const usageRepository = new UsageEventRepository(database);
+    const jobEventRepository = new JobEventRepository(database);
 
     return {
       tempDir,
@@ -43,6 +47,7 @@ describe('Persistence layer', () => {
       clarificationRepository,
       preferencesRepository,
       usageRepository,
+      jobEventRepository,
       conversationStore: new ConversationStoreService(messageRepository),
       jobStateService: new JobStateService(jobRepository),
       usageTrackingService: new UsageTrackingService(usageRepository),
@@ -65,7 +70,7 @@ describe('Persistence layer', () => {
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('messages', 'jobs', 'pending_clarifications', 'user_preferences', 'usage_events')",
     );
 
-    expect(migrationRows).toEqual([{ version: 1 }]);
+    expect(migrationRows).toEqual([{ version: 1 }, { version: 2 }]);
     expect(tables.map((table) => table.name).sort()).toEqual([
       'jobs',
       'messages',
@@ -133,20 +138,19 @@ describe('Persistence layer', () => {
     fs.rmSync(persistence.tempDir, { recursive: true, force: true });
   });
 
-  it('persists inbound messages, completed jobs, and outbound replies for text handling', async () => {
+  it('queues inbound text messages and persists the pending job state', async () => {
     const persistence = await createPersistence();
+    const jobService = new JobService(persistence.conversationStore, persistence.jobStateService);
+    const intakeService = new TelegramUpdateIntakeService(jobService);
     const handlers = new MessageHandlers(
       {} as any,
-      {
-        processTextMessageDetailed: jest.fn().mockResolvedValue({
-          responseText: 'stored response',
-          processingTimeMs: 1200,
-        }),
-      } as any,
+      intakeService,
       { recordActivity: jest.fn() } as any,
-      persistence.conversationStore,
-      persistence.jobStateService,
-      persistence.usageTrackingService,
+      {
+        sendAcknowledgement: jest.fn().mockResolvedValue({ message_id: 654 }),
+        sendFailureResponse: jest.fn(),
+      } as any,
+      jobService,
     );
 
     await handlers.handleText({
@@ -154,67 +158,50 @@ describe('Persistence layer', () => {
       chat: { id: 456 },
       update: { update_id: 789 },
       message: { message_id: 321, text: 'hello persistence' },
-      reply: jest.fn().mockResolvedValue({ message_id: 654 }),
     } as any);
 
     const messages = await persistence.messageRepository.listRecentMessagesByUser('123', 10);
-    const jobs = await persistence.jobRepository.listActiveJobsByUser('123');
-    const completedJob = await persistence.database.get<{ status: string; result_json: string }>(
-      'SELECT status, result_json FROM jobs LIMIT 1',
+    const jobs = await persistence.jobRepository.listQueuedJobs();
+    const storedJob = await persistence.database.get<{ status: string; dedupe_key: string | null; ack_message_id: string | null }>(
+      'SELECT status, dedupe_key, ack_message_id FROM jobs LIMIT 1',
     );
-    const usageEvents = await persistence.usageRepository.listEventsForUser('123', 10);
 
-    expect(messages).toHaveLength(2);
-    expect(messages[0].direction).toBe('outgoing');
-    expect(messages[1].direction).toBe('incoming');
-    expect(messages[1].status).toBe('processed');
-    expect(jobs).toEqual([]);
-    expect(completedJob?.status).toBe('completed');
-    expect(completedJob?.result_json).toContain('stored response');
-    expect(usageEvents.some((event) => event.eventType === 'message_processed')).toBe(true);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].direction).toBe('incoming');
+    expect(messages[0].status).toBe('processing');
+    expect(jobs).toHaveLength(1);
+    expect(storedJob).toEqual({
+      status: 'queued',
+      dedupe_key: '123:789:text',
+      ack_message_id: '654',
+    });
 
     await persistence.database.close();
     fs.rmSync(persistence.tempDir, { recursive: true, force: true });
   });
 
-  it('marks message and job as failed when text processing throws', async () => {
+  it('records job progress events in the async schema', async () => {
     const persistence = await createPersistence();
-    const handlers = new MessageHandlers(
-      {} as any,
-      {
-        processTextMessageDetailed: jest.fn().mockRejectedValue(new Error('processor blew up')),
-      } as any,
-      { recordActivity: jest.fn() } as any,
-      persistence.conversationStore,
-      persistence.jobStateService,
-      persistence.usageTrackingService,
-    );
-
-    await handlers.handleText({
-      from: { id: 123, username: 'tester' },
-      chat: { id: 456 },
-      update: { update_id: 790 },
-      message: { message_id: 322, text: 'this will fail' },
-      reply: jest.fn().mockResolvedValue({ message_id: 655 }),
-    } as any);
-
-    const failedMessage = await persistence.database.get<{ status: string; error_message: string | null }>(
-      "SELECT status, error_message FROM messages WHERE direction = 'incoming' LIMIT 1",
-    );
-    const failedJob = await persistence.database.get<{ status: string; error_message: string | null }>(
-      'SELECT status, error_message FROM jobs LIMIT 1',
-    );
-    const usageEvents = await persistence.usageRepository.listEventsForUser('123', 10);
-
-    expect(failedMessage).toEqual({
-      status: 'failed',
-      error_message: 'processor blew up',
+    const job = await persistence.jobRepository.createJob({
+      userId: '123',
+      chatId: '456',
+      jobType: 'text_processing',
+      payload: { text: 'hello' },
+      dedupeKey: '123:1:text',
     });
-    expect(failedJob).toEqual({
-      status: 'failed',
-      error_message: 'processor blew up',
-    });
-    expect(usageEvents.some((event) => event.eventType === 'error')).toBe(true);
+
+    await persistence.jobEventRepository.create(job.id, 'job.started', 'Working on it.');
+
+    const events = await persistence.jobEventRepository.listForJob(job.id);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual(
+      expect.objectContaining({
+        jobId: job.id,
+        eventType: 'job.started',
+        message: 'Working on it.',
+      }),
+    );
 
     await persistence.database.close();
     fs.rmSync(persistence.tempDir, { recursive: true, force: true });

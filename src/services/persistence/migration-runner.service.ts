@@ -2,6 +2,7 @@ import { logger } from '../../utils/logger';
 import { DatabaseService } from './database.service';
 import { nowIso } from './utils';
 import { migration001Initial } from './migrations/001_initial';
+import { migration002AsyncExecution } from './migrations/002_async_execution';
 
 interface MigrationDefinition {
   version: number;
@@ -14,6 +15,11 @@ const MIGRATIONS: MigrationDefinition[] = [
     version: 1,
     name: 'initial_persistence_schema',
     sql: migration001Initial,
+  },
+  {
+    version: 2,
+    name: 'async_execution_schema',
+    sql: migration002AsyncExecution,
   },
 ];
 

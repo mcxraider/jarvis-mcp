@@ -18,6 +18,7 @@ describe('BotStatusService', () => {
     expect(status).toContain('HEALTHY');
     expect(status).toContain('GPT model: gpt-4o');
     expect(status).toContain('Todoist: reachable');
+    expect(status).toContain('Queued jobs: 0');
     expect(status).toContain('Total interactions: 1');
     expect(status).toContain('Last activity type: message_text');
   });

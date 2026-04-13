@@ -20,6 +20,42 @@ export class JobStateService {
     return this.jobRepository.markFailed(jobId, error, result);
   }
 
+  requeue(jobId: string, error: string): Promise<void> {
+    return this.jobRepository.requeue(jobId, error);
+  }
+
+  findByDedupeKey(dedupeKey: string): Promise<PersistedJob | null> {
+    return this.jobRepository.findByDedupeKey(dedupeKey);
+  }
+
+  listQueuedJobs(): Promise<PersistedJob[]> {
+    return this.jobRepository.listQueuedJobs();
+  }
+
+  hasRunningJobForConcurrencyKey(concurrencyKey: string): Promise<boolean> {
+    return this.jobRepository.hasRunningJobForConcurrencyKey(concurrencyKey);
+  }
+
+  claim(jobId: string, workerId: string): Promise<PersistedJob | null> {
+    return this.jobRepository.claim(jobId, workerId);
+  }
+
+  requeueStaleRunningJobs(staleBeforeIso: string): Promise<number> {
+    return this.jobRepository.requeueStaleRunningJobs(staleBeforeIso);
+  }
+
+  updateAcknowledgementMessage(jobId: string, ackMessageId: string): Promise<void> {
+    return this.jobRepository.updateAcknowledgementMessage(jobId, ackMessageId);
+  }
+
+  updateProgressMessage(jobId: string, progressMessageId: string): Promise<void> {
+    return this.jobRepository.updateProgressMessage(jobId, progressMessageId);
+  }
+
+  getStatusCounts(): Promise<{ queued: number; running: number }> {
+    return this.jobRepository.getStatusCounts();
+  }
+
   getJob(jobId: string): Promise<PersistedJob | null> {
     return this.jobRepository.getJob(jobId);
   }

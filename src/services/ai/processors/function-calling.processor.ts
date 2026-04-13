@@ -1,9 +1,3 @@
-/**
- * Function calling processor for GPT service
- *
- * @module FunctionCallingProcessor
- */
-
 import OpenAI from 'openai';
 import { logger } from '../../../utils/logger';
 import { MessageProcessingResult } from '../../../types/gpt.types';
@@ -12,10 +6,8 @@ import { getFunctionCallingSystemPrompt, FINAL_RESPONSE_PROMPT } from '../../../
 import { GPTToolsService } from '../../tools/todoist-tools.service';
 import { ToolDispatcher, ToolCall } from '../../../types/tool.types';
 import { UsageTrackingService } from '../../persistence';
+import { GPTProcessingContext } from '../gpt.service';
 
-/**
- * Processor for handling GPT function calling capabilities
- */
 export class FunctionCallingProcessor {
   private readonly toolsService: GPTToolsService;
 
@@ -26,27 +18,17 @@ export class FunctionCallingProcessor {
     this.toolsService = new GPTToolsService(toolDispatcher);
   }
 
-  /**
-   * Processes a message using GPT with function calling capabilities and executes tool calls
-   *
-   * @param openai - OpenAI client instance
-   * @param model - Model to use for processing
-   * @param temperature - Temperature setting for the model
-   * @param message - The user's message to process
-   * @param userId - The user identifier for context
-   * @returns Promise<MessageProcessingResult> - The processing result with tool execution
-   */
   async processWithFunctionCalling(
     openai: OpenAI,
     model: string,
     temperature: number,
     message: string,
     userId: string,
+    context?: GPTProcessingContext,
   ): Promise<MessageProcessingResult> {
     const startTime = Date.now();
 
     try {
-      // Send message to GPT with function calling capabilities enabled
       const response = await openai.chat.completions.create({
         model,
         messages: [
@@ -60,7 +42,7 @@ export class FunctionCallingProcessor {
           },
         ],
         tools: this.toolsService.getAvailableTools(),
-        tool_choice: 'auto', // Let GPT decide when to use functions
+        tool_choice: 'auto',
         max_tokens: GPT_CONSTANTS.MAX_TOKENS,
         temperature,
       });
@@ -69,15 +51,14 @@ export class FunctionCallingProcessor {
       const initialInputTokens = response.usage?.prompt_tokens || 0;
       const initialOutputTokens = response.usage?.completion_tokens || 0;
 
-      // Log the full GPT response for inspection
       logger.debug('GPT function calling response', {
+        jobId: context?.jobId,
         userId,
         hasToolCalls: !!(responseMessage.tool_calls && responseMessage.tool_calls.length > 0),
         toolCallsCount: responseMessage.tool_calls?.length || 0,
         content: responseMessage.content,
       });
 
-      // Check if GPT wants to call any functions
       if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
         const finalResponse = await this.handleToolCalls(
           responseMessage,
@@ -86,6 +67,7 @@ export class FunctionCallingProcessor {
           temperature,
           message,
           userId,
+          context,
         );
 
         return {
@@ -101,12 +83,9 @@ export class FunctionCallingProcessor {
         };
       }
 
-      // If no function calls needed, return GPT's direct response
-      const directResponse =
-        responseMessage.content || "I apologize, but I couldn't process your request.";
-
       return {
-        response: directResponse,
+        response:
+          responseMessage.content || "I apologize, but I couldn't process your request.",
         originalMessage: message,
         processingTimeMs: Date.now() - startTime,
         usedFunctionCalling: false,
@@ -118,6 +97,7 @@ export class FunctionCallingProcessor {
       };
     } catch (error) {
       logger.error('Function calling processing failed', {
+        jobId: context?.jobId,
         userId,
         error: (error as Error).message,
       });
@@ -126,17 +106,6 @@ export class FunctionCallingProcessor {
     }
   }
 
-  /**
-   * Handles tool calls by executing them and generating a final response
-   *
-   * @param responseMessage - The GPT response containing tool calls
-   * @param openai - OpenAI client instance
-   * @param model - Model to use for final response generation
-   * @param temperature - Temperature setting
-   * @param originalMessage - The user's original message
-   * @param userId - User identifier
-   * @returns Promise<string> - Final response to send to user
-   */
   private async handleToolCalls(
     responseMessage: OpenAI.Chat.Completions.ChatCompletionMessage,
     openai: OpenAI,
@@ -144,13 +113,13 @@ export class FunctionCallingProcessor {
     temperature: number,
     originalMessage: string,
     userId: string,
+    context?: GPTProcessingContext,
   ): Promise<string> {
     if (!this.toolDispatcher || !responseMessage.tool_calls) {
       return "I'd like to help you with that, but I'm currently unable to execute the required actions.";
     }
 
     try {
-      // Convert OpenAI tool calls to our internal format
       const toolCalls: ToolCall[] = responseMessage.tool_calls.map((toolCall) => ({
         id: toolCall.id,
         type: 'function',
@@ -161,6 +130,7 @@ export class FunctionCallingProcessor {
       }));
 
       logger.info('Executing tool calls', {
+        jobId: context?.jobId,
         userId,
         toolCalls: toolCalls.map((tc) => ({
           id: tc.id,
@@ -171,6 +141,9 @@ export class FunctionCallingProcessor {
       for (const toolCall of toolCalls) {
         await this.usageTrackingService?.recordEvent({
           userId,
+          chatId: context?.chatId,
+          jobId: context?.jobId,
+          messageId: context?.sourceMessageId,
           eventType: 'tool_called',
           metadata: {
             toolCallId: toolCall.id,
@@ -179,9 +152,10 @@ export class FunctionCallingProcessor {
         });
       }
 
-      // Filter out any function names the dispatcher does not support
       const supportedCalls = toolCalls.filter((tc) => {
-        if (this.toolDispatcher!.isFunctionSupported(tc.function.name)) return true;
+        if (this.toolDispatcher!.isFunctionSupported(tc.function.name)) {
+          return true;
+        }
         logger.warn('Skipping unsupported function', { name: tc.function.name, userId });
         return false;
       });
@@ -190,11 +164,15 @@ export class FunctionCallingProcessor {
         return "I'm not able to perform that action right now.";
       }
 
-      // Execute all supported tool calls
-      const toolResults = await this.toolDispatcher.executeToolCalls(supportedCalls, userId);
+      await context?.onStage?.('tools.executing');
+      const toolResults = await this.toolDispatcher.executeToolCalls(supportedCalls, {
+        userId,
+        jobId: context?.jobId,
+        onStage: context?.onStage,
+      });
 
-      // Log execution results
       logger.info('Tool execution completed', {
+        jobId: context?.jobId,
         userId,
         results: toolResults.map((result) => ({
           tool_call_id: result.tool_call_id,
@@ -206,6 +184,9 @@ export class FunctionCallingProcessor {
       for (const result of toolResults) {
         await this.usageTrackingService?.recordEvent({
           userId,
+          chatId: context?.chatId,
+          jobId: context?.jobId,
+          messageId: context?.sourceMessageId,
           eventType: 'tool_completed',
           metadata: {
             toolCallId: result.tool_call_id,
@@ -215,8 +196,7 @@ export class FunctionCallingProcessor {
         });
       }
 
-      // Generate final response based on tool execution results
-      const finalResponse = await this.generateFinalResponse(
+      return this.generateFinalResponse(
         openai,
         model,
         temperature,
@@ -224,10 +204,9 @@ export class FunctionCallingProcessor {
         responseMessage,
         toolResults,
       );
-
-      return finalResponse;
     } catch (error) {
       logger.error('Tool call execution failed', {
+        jobId: context?.jobId,
         userId,
         error: (error as Error).message,
       });
@@ -236,17 +215,6 @@ export class FunctionCallingProcessor {
     }
   }
 
-  /**
-   * Generates a final natural language response based on tool execution results
-   *
-   * @param openai - OpenAI client instance
-   * @param model - Model to use
-   * @param temperature - Temperature setting
-   * @param originalMessage - User's original message
-   * @param toolCallMessage - GPT's tool call message
-   * @param toolResults - Results from tool execution
-   * @returns Promise<string> - Final response
-   */
   private async generateFinalResponse(
     openai: OpenAI,
     model: string,
@@ -256,7 +224,6 @@ export class FunctionCallingProcessor {
     toolResults: any[],
   ): Promise<string> {
     try {
-      // Create messages array including the tool results
       const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
         {
           role: 'system',
@@ -273,7 +240,6 @@ export class FunctionCallingProcessor {
         },
       ];
 
-      // Add tool results as tool messages
       toolResults.forEach((result) => {
         messages.push({
           role: 'tool',
@@ -298,13 +264,12 @@ export class FunctionCallingProcessor {
         error: (error as Error).message,
       });
 
-      // Fallback: create a simple response based on results
       const successfulActions = toolResults.filter((result) => !result.error);
       if (successfulActions.length > 0) {
         return `I successfully completed ${successfulActions.length} action(s) for you.`;
-      } else {
-        return 'I encountered some issues while processing your request. Please try again.';
       }
+
+      return 'I encountered some issues while processing your request. Please try again.';
     }
   }
 }

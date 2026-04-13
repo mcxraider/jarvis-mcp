@@ -1,4 +1,3 @@
-// src/services/telegram/message-processor.service.ts
 import { logger } from '../../utils/logger';
 import { TextProcessorService } from './processors/text-processor.service';
 import { AudioProcessorService } from './processors/audio-processor.service';
@@ -6,28 +5,22 @@ import { ToolDispatcher } from '../../types/tool.types';
 import { ProcessorResponse, ProcessingContext } from '../../types/processing.types';
 import { UsageTrackingService } from '../persistence';
 
-/**
- * Main service responsible for coordinating message processing
- * Delegates to specialized processors based on message type
- */
 export class MessageProcessorService {
   private readonly textProcessor: TextProcessorService;
   private readonly audioProcessor: AudioProcessorService;
 
   constructor(toolDispatcher?: ToolDispatcher, usageTrackingService?: UsageTrackingService) {
     this.textProcessor = new TextProcessorService(toolDispatcher, usageTrackingService);
-    this.audioProcessor = new AudioProcessorService(usageTrackingService);
+    this.audioProcessor = new AudioProcessorService(toolDispatcher, usageTrackingService);
   }
 
-  /**
-   * Processes text messages from users
-   */
   async processTextMessage(
     text: string,
     userId?: number,
     context?: ProcessingContext,
   ): Promise<string> {
     logger.info('Delegating text message processing', {
+      jobId: context?.jobId,
       userId,
       messageLength: text.length,
     });
@@ -43,17 +36,15 @@ export class MessageProcessorService {
     return this.textProcessor.processTextMessageDetailed(text, userId, context);
   }
 
-  /**
-   * Processes audio messages (voice notes, audio files)
-   */
   async processAudioMessage(
     fileUrl: string,
     userId?: number,
     context?: ProcessingContext,
   ): Promise<string> {
     logger.info('Delegating audio message processing', {
+      jobId: context?.jobId,
       userId,
-      fileUrl: fileUrl.substring(0, 50) + '...', // Log partial URL for privacy
+      fileUrl: fileUrl.substring(0, 50) + '...',
     });
 
     return this.audioProcessor.processAudioMessage(fileUrl, userId, context);
@@ -67,9 +58,6 @@ export class MessageProcessorService {
     return this.audioProcessor.processAudioMessageDetailed(fileUrl, userId, context);
   }
 
-  /**
-   * Processes documents that contain audio
-   */
   async processAudioDocument(
     fileUrl: string,
     fileName: string,
@@ -78,6 +66,7 @@ export class MessageProcessorService {
     context?: ProcessingContext,
   ): Promise<string> {
     logger.info('Delegating audio document processing', {
+      jobId: context?.jobId,
       userId,
       fileName,
       mimeType,
@@ -102,10 +91,6 @@ export class MessageProcessorService {
     );
   }
 
-  /**
-   * Determines message type and routes to appropriate processor
-   * This method can be used for automatic routing based on message content
-   */
   async processMessage(
     messageData: {
       type: 'text' | 'audio' | 'audio_document';
@@ -123,10 +108,8 @@ export class MessageProcessorService {
     switch (messageData.type) {
       case 'text':
         return this.processTextMessage(messageData.content, userId);
-
       case 'audio':
         return this.processAudioMessage(messageData.content, userId);
-
       case 'audio_document':
         if (!messageData.fileName || !messageData.mimeType) {
           throw new Error('Audio document processing requires fileName and mimeType');
@@ -137,7 +120,6 @@ export class MessageProcessorService {
           messageData.mimeType,
           userId,
         );
-
       default:
         logger.warn('Unknown message type received', {
           userId,
